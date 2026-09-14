@@ -205,3 +205,30 @@ jobs:
           mkdir -p "$RUNNER_TEMP/mod" && cd "$RUNNER_TEMP/mod"
           printf '%s' '{"Name":"Board","Exposes":[{"Name":"Inlet Temp","Type":"TMP75"}]}' > board.json
           PYTHONPATH="$GITHUB_WORKSPACE/src" python3 -m bmc_sensor_audit.cli declare --config board.json
+
+  # Every release the two declared ranges claim, installed and run.
+  #
+  # The suite above runs against ONE version of each pinned dependency -- the
+  # newest the resolver picked, which is the release a range is least likely to
+  # be wrong about. The floor is the interesting end and nothing here reached
+  # it. `arbiter-engine` 0.1.14 made that concrete for a sibling that pins the
+  # same engine by range: it widened the decline vocabulary and took that
+  # package from a clean corpus to exit 2 on every release in its own range.
+  # Its sweep caught it in CI. This package had no such leg.
+  pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the probe's own needs
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install virtualenv
+
+      - name: Every release each pin claims
+        run: python3 tools/probe_pin.py

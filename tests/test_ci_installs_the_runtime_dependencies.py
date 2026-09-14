@@ -89,16 +89,49 @@ class TestTheHelperReadsTheRealList:
         assert out.stdout.strip(), "printed nothing; the workflow would install nothing"
 
 
+def _jobs(path):
+    """`(name, lines)` per job. Line-based, like `_install_lines`, and for the
+    same reason: this suite runs with nothing but pytest installed, so a YAML
+    parser here would be a dependency added to read a workflow."""
+    out, name, lines = [], None, []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line[:2] == "  " and line[2:3] not in (" ", "-", "#", "") and line.rstrip().endswith(":"):
+            if name:
+                out.append((name, lines))
+            name, lines = line.strip().rstrip(":"), []
+        elif name:
+            lines.append(line)
+    if name:
+        out.append((name, lines))
+    return out
+
+
 class TestEveryJobThatRunsTheSuiteInstallsThem:
-    """The population is every install line that is followed by a test run and
-    does NOT install the package itself. Named by file so a new workflow has to
-    be added here deliberately rather than inherit a pass by being unseen."""
+    """The population is every install line IN A JOB THAT RUNS THE SUITE and
+    that does NOT install the package itself. Named by file so a new workflow
+    has to be added here deliberately rather than inherit a pass by being
+    unseen.
+
+    **The job condition is load-bearing and was missing.** The predicate was
+    every install line in the file, which is wider than the sentence above it --
+    and the first job to be added that installs something without running the
+    suite failed this, correctly by the code and wrongly by the claim. A range
+    sweep installs `virtualenv` and then builds its own environments, each of
+    which installs the package properly; requiring it to install this package's
+    runtime dependencies into a directory nothing imports from would be
+    satisfying a check rather than passing one.
+    """
 
     @pytest.mark.parametrize("name", ["checks.yml", "canary.yml"])
     def test_the_workflow_derives_the_list(self, name):
         path = WORKFLOWS / name
         assert path.is_file(), f"{name} is gone; this test now measures nothing"
-        installs = [l for l in _install_lines(path) if "-e ." not in l and "build" not in l]
+        runs_suite = [lines for job, lines in _jobs(path)
+                      if any("pytest" in l for l in lines)]
+        assert runs_suite, f"no job in {name} runs the suite; this measures nothing"
+        installs = [l for lines in runs_suite for l in lines
+                    if "pip install" in l.strip() and not l.strip().startswith("#")
+                    and "-e ." not in l and "build" not in l]
         assert installs, f"no suite-install line found in {name}"
         for line in installs:
             assert "runtime_deps.py" in line, (
