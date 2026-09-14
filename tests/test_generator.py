@@ -223,8 +223,8 @@ class TestTranslationBackToTheSensor:
     engine started saying *below* itself."""
 
     @pytest.mark.parametrize("problem_type", [
-        "below_critical_threshold", "below_warning_threshold", "approaching_floor"])
-    def test_every_floor_side_finding_reads_as_below(self, built, problem_type):
+        "below_critical_threshold", "below_warning_threshold"])
+    def test_every_floor_side_comparison_reads_as_below(self, built, problem_type):
         _, _, manifest = built
         sensor = next(s for s in manifest.sensors if s.lower[1] is not None)
         finding = {"entity_id": sensor.entity_type, "severity": "critical",
@@ -235,14 +235,44 @@ class TestTranslationBackToTheSensor:
         assert sensor.declared_name in translated
 
     @pytest.mark.parametrize("problem_type", [
-        "threshold_exceeded", "threshold_warning", "approaching_limit"])
-    def test_every_ceiling_side_finding_reads_as_above(self, built, problem_type):
+        "threshold_exceeded", "threshold_warning"])
+    def test_every_ceiling_side_comparison_reads_as_above(self, built, problem_type):
         _, _, manifest = built
         sensor = next(s for s in manifest.sensors if s.upper[1] is not None)
         finding = {"entity_id": sensor.entity_type, "severity": "critical",
                    "problem_type": f"{problem_type}:{READING}",
                    "reason": f"{READING} exceeds critical threshold"}
         assert "above" in manifest.translate_finding(finding)
+
+    @pytest.mark.parametrize("problem_type,side,other", [
+        ("approaching_floor", "lower", "upper"),
+        ("approaching_limit", "upper", "lower"),
+    ], ids=["floor", "ceiling"])
+    def test_a_projection_is_attributed_to_its_own_side(self, built, problem_type,
+                                                        side, other):
+        """The two arms that PROJECT, asserted on the thing this class is about.
+
+        These used to sit in the two parametrised cases above, asserting that a
+        trend reads as *BELOW* or *above* -- which pinned a sentence that was
+        false. Both fire only while the reading has NOT reached the critical
+        bound, so neither is a breach, and the core was corrected to say so.
+
+        What this repository actually needs from the translation is that a
+        finding lands on the side of the band it came from. That is asserted
+        here, and it holds against the wording on either side of that
+        correction, which is the property a consumer's test wants when the
+        package it reads is resolved by range.
+        """
+        _, _, manifest = built
+        sensor = next(s for s in manifest.sensors
+                      if s.lower[1] is not None and s.upper[1] is not None)
+        finding = {"entity_id": sensor.entity_type, "severity": "high",
+                   "problem_type": f"{problem_type}:{READING}",
+                   "reason": f"{READING} trending toward a limit"}
+        translated = manifest.translate_finding(finding)
+        assert sensor.declared_name in translated
+        assert side in translated, translated
+        assert other not in translated, translated
 
     def test_the_bound_table_is_the_engines_vocabulary_not_ours(self):
         """Derived, not transcribed. Every BOUNDEDNESS problem_type the installed
