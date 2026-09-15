@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -56,6 +57,52 @@ EVIDENCE = pathlib.Path(__file__).resolve().parent / "pin_evidence.json"
 #: `name>=lo,<hi`. Deliberately narrow: this package declares two pins and a
 #: general specifier parser would be a dependency added to read a dependency.
 PIN = re.compile(r"([A-Za-z0-9._-]+)\s*(>=\s*[0-9][^,\"']*)\s*,\s*(<\s*[0-9][^,\"']*)")
+
+
+#: One definition of the work-directory prefix, because the reaper and the
+#: `mkdtemp` that creates them have to agree. Written twice, the two drift and
+#: the reaper quietly stops matching anything -- which reads exactly like a
+#: machine that never leaks.
+WORK_PREFIX = "bsa-pin-"
+
+#: How old an abandoned directory must be before it is reaped. Anything younger
+#: could belong to a probe running right now.
+REAP_AFTER_SECONDS = 6 * 3600
+
+
+def reap_abandoned(prefix: str = WORK_PREFIX,
+                   older_than: int = REAP_AFTER_SECONDS) -> list[str]:
+    """Remove work directories a previous run was killed before cleaning up.
+
+    The `finally` below covers exceptions. It does not cover SIGKILL, a
+    timed-out CI step or a reboot, and a run that dies that way leaves one
+    virtualenv per release in range -- gigabytes, with nothing left alive to
+    remove them. So this reaps on the way IN: the run that leaked is by
+    definition not around to clean up on the way out.
+
+    Conservative on purpose. A directory is reaped only when it carries this
+    tool's own prefix, is older than the threshold -- so a probe running
+    concurrently is never touched -- and either holds environments or is the
+    empty shell of a run that died before building one. Anything else wearing
+    the prefix belongs to somebody else and is left alone.
+    """
+    reaped = []
+    cutoff = time.time() - older_than
+    for path in sorted(pathlib.Path(tempfile.gettempdir()).glob(f"{prefix}*")):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            occupied = any(path.iterdir())
+        except OSError:
+            continue
+        if occupied and not any(path.glob("*/pyvenv.cfg")):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            reaped.append(path.name)
+    return reaped
 
 
 def _version_key(text: str) -> tuple[int, ...]:
@@ -181,7 +228,7 @@ def probe(dist: str, low: str, high: str, sweep: bool, keep: bool) -> dict:
         result["verdict"] = "empty-range"
         return result
 
-    work = pathlib.Path(tempfile.mkdtemp(prefix="bsa-pin-"))
+    work = pathlib.Path(tempfile.mkdtemp(prefix=WORK_PREFIX))
     try:
         for version in in_range:
             ok, note = exercise(dist, version, work / f"in-{version}")
@@ -226,6 +273,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--out", type=pathlib.Path, default=EVIDENCE)
     args = ap.parse_args(argv)
+
+    abandoned = reap_abandoned()
+    if abandoned:
+        print(f"reaped {len(abandoned)} work director"
+              f"{'y' if len(abandoned) == 1 else 'ies'} left by a killed run: "
+              f"{', '.join(abandoned)}")
 
     pins = declared_pins()
     if not pins:
