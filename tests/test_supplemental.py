@@ -24,9 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = ROOT / "tests" / "fixtures" / "upstream"
 sys.path.insert(0, str(ROOT / "src"))
 
-from bmc_sensor_audit.detect.generator import (  # noqa: E402
-    generate, pairing_candidates, peer_property)
-from bmc_sensor_audit.detect.supplemental import (  # noqa: E402
+from bmc_sensor_audit.verticals.peer_groups import pairing_candidates
+from presence_audit.generator import (  # noqa: E402
+    generate, peer_property)
+from presence_audit.supplemental import (  # noqa: E402
     FORMAT, SupplementalError, load_supplemental, unmatched_names)
 from bmc_sensor_audit.inventory.entity_manager import load_declaration  # noqa: E402
 
@@ -93,7 +94,7 @@ class TestCandidatesAreOfferedAndAssertedByNobody:
     def test_a_candidate_never_becomes_a_pairing_on_its_own(self, declaration):
         """The whole distinction. Generating without a supplemental file must produce
         a model with no agreement check in it, however many candidates exist."""
-        model, manifest = generate(declaration)
+        model, manifest = generate(declaration, domain_id="bmc-sensor-audit")
         assert manifest.candidates
         assert manifest.counts()["redundant_groups"] == 0
         for indicators in model["domain"]["indicators"].values():
@@ -187,7 +188,7 @@ class TestTheGeneratedModelCarriesTheDeclaration:
     def built(self, tmp_path, declaration):
         path = _write(tmp_path, redundant_groups=[
             _group(["MB_U73_THERM_LOCAL", "MB_U73_THERM_REMOTE"], tolerance=0.10)])
-        model, manifest = generate(declaration,
+        model, manifest = generate(declaration, domain_id="bmc-sensor-audit",
                                    supplemental=load_supplemental(path))
         return model, manifest
 
@@ -199,6 +200,40 @@ class TestTheGeneratedModelCarriesTheDeclaration:
         peer = manifest.type_for("MB_U73_THERM_REMOTE")
         assert "consistency" in model["domain"]["indicators"][primary][0]
         assert "consistency" not in model["domain"]["indicators"][peer][0]
+
+    def test_consistency_arrives_with_a_rule_the_engine_can_run(self, built):
+        """CONSISTENCY asks two different questions and this generator only ever
+        asks one of them, which is why it declares no `role:` anywhere.
+
+        Reported from outside 2026-09-02 as a coming coverage drop: the engine
+        stopped inferring a CONSISTENCY role from an indicator's NAME, this
+        package declares no roles, so every CONSISTENCY cell would begin
+        declining `missing_role`. Measured against the engine before believing
+        it, and the premise is false -- the axiom is emitted in ONE place and
+        only together with the `agrees_with` block below, and the agreement rule
+        needs no role. What declines is CONSISTENCY carrying neither.
+
+        DECLARING ROLES WOULD HAVE BEEN THE WRONG REMEDY, and worse than doing
+        nothing. Nothing here knows what kind of quantity a BMC sensor reports,
+        so the only way to pick a role per sensor is to read its NAME -- which is
+        the inference the engine just removed. The answer to a name-derived rule
+        is never a hand-written copy of the same guess.
+
+        The residue is this pin rather than a change: it holds the property that
+        makes roles unnecessary, and fails if a later edit declares CONSISTENCY
+        without a rule. That failure would otherwise be silent, because a decline
+        reads as coverage the reader never had.
+        """
+        model, _ = built
+        declared = [(t, i) for t, inds in model["domain"]["indicators"].items()
+                    for i in inds if "CONSISTENCY" in i.get("axioms", [])]
+        assert declared, "no CONSISTENCY was generated; this pin is vacuous"
+        naked = [f"{t}.{i['name']}" for t, i in declared
+                 if "consistency" not in i and "role" not in i]
+        assert naked == [], (
+            f"{naked} declare CONSISTENCY with neither an `agrees_with` block "
+            f"nor a `role:`; the engine declines those and the coverage is "
+            f"imaginary")
 
     def test_the_peer_is_named_as_a_property_not_an_entity(self, built):
         """A checker holds an IndicatorSpec and an Entity and never the model, so it
@@ -213,7 +248,7 @@ class TestTheGeneratedModelCarriesTheDeclaration:
         path = _write(tmp_path, redundant_groups=[
             _group(["MB_U73_THERM_LOCAL", "MB_U73_THERM_REMOTE"],
                    tolerance_absolute=3.0)])
-        model, manifest = generate(declaration,
+        model, manifest = generate(declaration, domain_id="bmc-sensor-audit",
                                    supplemental=load_supplemental(path))
         block = model["domain"]["indicators"][
             manifest.type_for("MB_U73_THERM_LOCAL")][0]["consistency"]

@@ -1,0 +1,45 @@
+{
+ "pins": [
+  {
+   "dist": "arbiter-engine",
+   "specifier": ">=0.1.8,<0.2",
+   "in_range": [
+    "0.1.8",
+    "0.1.9",
+    "0.1.10",
+    "0.1.11",
+    "0.1.12",
+    "0.1.13",
+    "0.1.14"
+   ],
+   "below": [
+    {
+     "version": "0.1.7",
+     "passed": false
+    }
+   ],
+   "failures": [],
+   "verdict": "floor-holds",
+   "passed_below": []
+  },
+  {
+   "dist": "presence-audit",
+   "specifier": ">=0.1.7,<0.2",
+   "in_range": [
+    "0.1.7",
+    "0.1.8"
+   ],
+   "below": [
+    {
+     "version": "0.1.6",
+     "passed": false
+    }
+   ],
+   "failures": [],
+   "verdict": "floor-holds",
+   "passed_below": []
+  }
+ ],
+ "exit": 0,
+ "swept": false
+}

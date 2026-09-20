@@ -18,11 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from bmc_sensor_audit.inventory.diff import compare
+from presence_audit.diff import compare
 from bmc_sensor_audit.inventory.entity_manager import load_declaration
 from bmc_sensor_audit.inventory.redfish import RedfishClient, walk_chassis, walk_from_dict
-from bmc_sensor_audit.inventory.regression import compare_walks
-from bmc_sensor_audit.report import regression_as_json, regression_as_text
+from presence_audit.regression import compare_walks
+from presence_audit.report import regression_as_json, regression_as_text
 from bmc_sensor_audit.testing.mock_redfish import MockBMC, serve
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -270,31 +270,57 @@ class TestTheVocabularyStaysWhole:
 
     @staticmethod
     def _emitted() -> set[str]:
+        """Every change kind the SYSTEM emits, not the ones one module does.
+
+        This scanned `regression.py` alone until five kinds moved to the vertical
+        that supplies them -- units, enabled/disabled, reading lost, tree shape.
+        The kinds were still emitted; the scan had stopped being able to see
+        them, and the guard fired saying nothing produced them. A population
+        narrower than the claim reports an absence that is not there.
+        """
         import re
 
-        from bmc_sensor_audit.inventory import regression as module
+        from presence_audit import regression as module
 
-        source = Path(module.__file__).read_text()
-        kinds = set(re.findall(r'Change\(\s*"([a-z_]+)"', source))
-        assert kinds, "no change kinds found in the source; the pattern moved"
+        # The population spans TWO DISTRIBUTIONS now, and it has to be named
+        # from both ends. It used to be `regression.py`'s sibling directory,
+        # which worked only while the vertical lived beside it; after the split
+        # that walk reaches `presence-audit`'s own parent and finds no verticals
+        # at all -- so the scan came up short and the guard reported four kinds
+        # as unemittable that are emitted on every run. Exactly the failure this
+        # docstring already describes, recreated for a new reason.
+        import bmc_sensor_audit
+        verticals = Path(bmc_sensor_audit.__file__).parent / "verticals"
+        assert verticals.is_dir(), f"{verticals} is not where this package's vertical lives"
+        roots = [Path(module.__file__), *sorted(verticals.glob("*.py"))]
+        kinds: set[str] = set()
+        for path in roots:
+            kinds |= set(re.findall(r'Change\(\s*"([a-z_]+)"', path.read_text()))
+        assert kinds, "no change kinds found in any source; the pattern moved"
         return kinds
 
     def test_every_kind_is_ranked_and_has_a_headline(self):
-        from bmc_sensor_audit.report import CHANGE_ORDER, _CHANGE_HEADLINE
+        # `change_headlines()` was the module constant `_CHANGE_HEADLINE` until
+        # the core learned to phrase its report in the registered domain's noun.
+        # A headline carrying a noun cannot be a dict built at import time,
+        # because the vertical registers afterwards -- so it became a function,
+        # and a public one, since this test was already reaching past the
+        # underscore to ask a question the core owns.
+        from presence_audit.report import CHANGE_ORDER, change_headlines
 
         emitted = self._emitted()
         assert emitted - set(CHANGE_ORDER) == set(), "unranked kinds sort last silently"
-        assert emitted - set(_CHANGE_HEADLINE) == set(), "kinds with no headline"
+        assert emitted - set(change_headlines()) == set(), "kinds with no headline"
 
     def test_nothing_is_ranked_that_cannot_be_emitted(self):
         """The other direction. A stale entry is not dangerous, but it is a claim
         that the report can produce something it cannot."""
-        from bmc_sensor_audit.report import CHANGE_ORDER
+        from presence_audit.report import CHANGE_ORDER
 
         assert set(CHANGE_ORDER) - self._emitted() == set()
 
     def test_every_regression_kind_is_one_the_module_emits(self):
-        from bmc_sensor_audit.inventory.regression import REGRESSION_KINDS
+        from presence_audit.regression import REGRESSION_KINDS
 
         assert set(REGRESSION_KINDS) - self._emitted() == set(), (
             "a kind listed as a regression that nothing produces cannot fail a "

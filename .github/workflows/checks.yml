@@ -52,7 +52,12 @@ jobs:
         # PYTHONPATH stays a real negative.
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pyyaml pytest
+          # The package itself stays UNINSTALLED on purpose -- see the note
+          # above -- but its runtime dependencies must be present or the suite
+          # cannot even collect. Derived from pyproject rather than repeated
+          # here, so the range that binds and the range CI installs cannot
+          # drift apart.
+          python3 -m pip install --quiet pyyaml pytest $(python3 tools/runtime_deps.py)
           python3 -m pytest tests/ -q
 
   checks:
@@ -98,6 +103,32 @@ jobs:
           done
           exit $FAILED
 
+      - name: Authorship
+        # A commit's author is neither its message nor a file in it, so neither
+        # check above can see it. A local `user.email` quietly beat the global
+        # one and a personal address reached 24 published commits. The hook
+        # checks the setting before the commit; this checks the RESULT after it,
+        # which is the thing that actually gets published.
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before || '' }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            LIST=$(git rev-parse HEAD)
+          else
+            LIST=$(git rev-list "$BASE..${{ github.sha }}")
+          fi
+          FAILED=0
+          for SHA in $LIST; do
+            for WHO in $(git log -1 --format='%ae%n%ce' "$SHA"); do
+              case "$WHO" in
+                *@users.noreply.github.com|*@noreply.github.com) ;;
+                *) echo "::error::$SHA carries a real address in its authorship"; FAILED=1 ;;
+              esac
+            done
+          done
+          exit $FAILED
+
       - name: Tests
         # The PACKAGE is not pip-installed first, deliberately. One test asserts that
         # a bare `python3 -m bmc_sensor_audit.cli` FAILS without PYTHONPATH, and an
@@ -122,7 +153,12 @@ jobs:
         # it exists to run.
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pyyaml pytest
+          # The package itself stays UNINSTALLED on purpose -- see the note
+          # above -- but its runtime dependencies must be present or the suite
+          # cannot even collect. Derived from pyproject rather than repeated
+          # here, so the range that binds and the range CI installs cannot
+          # drift apart.
+          python3 -m pip install --quiet pyyaml pytest $(python3 tools/runtime_deps.py)
           python3 -m pytest tests/ -q
 
       - name: The documented console-script path, from a clean checkout
@@ -169,3 +205,30 @@ jobs:
           mkdir -p "$RUNNER_TEMP/mod" && cd "$RUNNER_TEMP/mod"
           printf '%s' '{"Name":"Board","Exposes":[{"Name":"Inlet Temp","Type":"TMP75"}]}' > board.json
           PYTHONPATH="$GITHUB_WORKSPACE/src" python3 -m bmc_sensor_audit.cli declare --config board.json
+
+  # Every release the two declared ranges claim, installed and run.
+  #
+  # The suite above runs against ONE version of each pinned dependency -- the
+  # newest the resolver picked, which is the release a range is least likely to
+  # be wrong about. The floor is the interesting end and nothing here reached
+  # it. `arbiter-engine` 0.1.14 made that concrete for a sibling that pins the
+  # same engine by range: it widened the decline vocabulary and took that
+  # package from a clean corpus to exit 2 on every release in its own range.
+  # Its sweep caught it in CI. This package had no such leg.
+  pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the probe's own needs
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install virtualenv
+
+      - name: Every release each pin claims
+        run: python3 tools/probe_pin.py

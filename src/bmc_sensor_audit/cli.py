@@ -27,20 +27,32 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .verticals.field_strictness import strict_fields_as_text
+from presence_audit import plugins as _plugins
+from presence_audit import vocabulary as _vocabulary
+from .verticals import bmc as _bundled
+from presence_audit.vocabulary import PluginError
 from .inventory.declaration_source import (DeclarationSourceError,
                                            candidate_from_walk,
                                            load_declaration_source, merge_sources)
-from .inventory.diff import compare
+from presence_audit import exit_contract as _exit_contract
+from presence_audit.diff import compare
 from .inventory.entity_manager import load_declaration
 from .inventory.redfish import (CertificatePinError, RedfishClient, Walk,
                                 order_walks, validate_walk,
                                 etag_cache, membership_unchanged,
                                 walk_chassis, walk_digest, walk_from_dict)
-from .inventory.regression import compare_walks, parse_prefix_map
-from .report import (as_json, as_text, regression_as_json, regression_as_text,
-                     strict_fields_as_text)
+from presence_audit.regression import compare_walks, parse_prefix_map
+from presence_audit.report import (as_json, as_text, regression_as_json, regression_as_text,
+                     )
 
-EXIT_CLEAN, EXIT_REGRESSION, EXIT_INCOMPLETE = 0, 1, 2
+# DERIVED from the core's contract, not written out again here. The three
+# numbers had two homes -- this line and `presence_audit.exit_contract` -- and
+# two records of one fact drift. The NAMES stay this tool's own: `regression`
+# is what a `1` means here, and the core cannot know that.
+EXIT_CLEAN = _exit_contract.CLEAN
+EXIT_REGRESSION = _exit_contract.FINDINGS
+EXIT_INCOMPLETE = _exit_contract.INCOMPLETE
 
 
 def _load_recorded_walk(path: str) -> Walk:
@@ -425,7 +437,7 @@ def _report_unobserved_fields(walk: Walk, requested: bool) -> int:
     """
     if not requested or walk.fields_observed:
         return EXIT_CLEAN
-    from .report import unobserved_reason
+    from .verticals.field_strictness import unobserved_reason
 
     print(f"\nfield strictness was requested and could not be checked: "
           f"{unobserved_reason(walk)}.\nThis run has not answered the question it "
@@ -456,7 +468,7 @@ def _report_uncomparable_fields(before: Walk, after: Walk, requested: bool) -> i
     """
     if not requested or (before.fields_observed and after.fields_observed):
         return EXIT_CLEAN
-    from .report import unobserved_reason
+    from .verticals.field_strictness import unobserved_reason
 
     missing = [(label, walk) for label, walk in (("--before", before), ("--after", after))
                if not walk.fields_observed]
@@ -513,7 +525,7 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
     # Composed the way `detect` composes its two stages: the worse wins, and 2 outranks
     # 1 because could-not-read is a different claim from something-got-worse.
     stage1 = EXIT_REGRESSION if report.regressions else EXIT_CLEAN
-    return max(stage1, unreadable_floor, strict_floor)
+    return _exit_contract.compose(stage1, unreadable_floor, strict_floor)
 
 
 def _cmd_detect(args: argparse.Namespace) -> int:
@@ -577,11 +589,11 @@ def _cmd_detect(args: argparse.Namespace) -> int:
               "Stage 1 coverage above is complete and unaffected.", file=sys.stderr)
         return EXIT_INCOMPLETE
 
-    from .detect.feeder import evaluate, feed
-    from .detect.generator import generate
-    from .detect.supplemental import (SupplementalError, load_supplemental,
+    from presence_audit.feeder import evaluate, feed
+    from presence_audit.generator import generate
+    from presence_audit.supplemental import (SupplementalError, load_supplemental,
                                       unmatched_names)
-    from .report import detect_as_text, supplemental_as_text
+    from presence_audit.report import detect_as_text, supplemental_as_text
 
     supplemental = None
     if args.supplemental:
@@ -607,7 +619,12 @@ def _cmd_detect(args: argparse.Namespace) -> int:
         # what was declared before they read a verdict that rests on it.
         print(supplemental_as_text(supplemental))
 
-    model, manifest = generate(declaration, expect_variation=not args.no_stuck_at,
+    # The domain id is DECLARED here rather than defaulted in the generator.
+    # It used to default to this distribution's name, in code that is now
+    # domain-neutral and cannot know what domain it is generating for. The
+    # string is unchanged, so an emitted model is byte-identical to before.
+    model, manifest = generate(declaration, domain_id="bmc-sensor-audit",
+                               expect_variation=not args.no_stuck_at,
                                supplemental=supplemental)
     if args.model_out:
         Path(args.model_out).write_text(yaml.safe_dump(model))
@@ -632,7 +649,7 @@ def _cmd_detect(args: argparse.Namespace) -> int:
         # `source: unavailable`, and that refusal reads a lot like a clean run.
         from arbiter_engine.api import attest
 
-        from .detect.attestation import build_attestation
+        from presence_audit.attestation import build_attestation
         # The artifact leaves through a different door from every committed file,
         # and the hygiene perimeter guards commits. `target` is a Redfish URL by
         # default, so an artifact uploaded from CI can publish an internal hostname
@@ -653,7 +670,7 @@ def _cmd_detect(args: argparse.Namespace) -> int:
         # No exit floor: `check` completed and its findings stand. What did not
         # complete is the evidence the engine attaches to them, which is a weaker
         # thing than the audit itself.
-        from .report import unattested_notice
+        from presence_audit.report import unattested_notice
 
         notice = unattested_notice(artifact, args.attest_out)
         if notice:
@@ -671,7 +688,8 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     # which returns 0 or 1 by contract -- `2` is the caller's to give.
     stage1 = EXIT_REGRESSION if current.regressions else EXIT_CLEAN
     schema_floor = EXIT_INCOMPLETE if outcome.schema_mismatch else EXIT_CLEAN
-    return max(stage1, outcome.exit_code, unreadable_floor, schema_floor)
+    return _exit_contract.compose(stage1, outcome.exit_code,
+                                  unreadable_floor, schema_floor)
 
 
 def _cmd_regression(args: argparse.Namespace) -> int:
@@ -724,7 +742,7 @@ def _cmd_regression(args: argparse.Namespace) -> int:
     if not report.complete:
         return EXIT_INCOMPLETE
     stage1 = EXIT_REGRESSION if report.regressions else EXIT_CLEAN
-    return max(stage1, strict_floor)
+    return _exit_contract.compose(stage1, strict_floor)
 
 
 def _cmd_validate_attestation(args: argparse.Namespace) -> int:
@@ -735,7 +753,7 @@ def _cmd_validate_attestation(args: argparse.Namespace) -> int:
     the command existing rather than the rule living inside a CI workflow where only
     the producer can reach it.
     """
-    from .detect.attestation import validate_attestation
+    from presence_audit.attestation import validate_attestation
 
     try:
         artifact = json.loads(Path(args.path).read_text())
@@ -843,6 +861,14 @@ def build_parser() -> argparse.ArgumentParser:
     # usage error, so a downstream floor could be declared and never checked.
     parser.add_argument("--version", action="version",
                         version=f"bmc-sensor-audit {__version__}")
+    # The seam. Global rather than per-subcommand: a vertical supplies the
+    # vocabulary the whole run classifies with, not one command's.
+    parser.add_argument("--plugin", action="append", metavar="SPEC",
+                        help="load a vertical: module[:callable] or path.py[:callable]")
+    parser.add_argument("--no-entry-points", action="store_true",
+                        help="ignore installed entry points; use only --plugin "
+                             "and the environment")
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     declare = subparsers.add_parser(
@@ -990,7 +1016,10 @@ def build_parser() -> argparse.ArgumentParser:
 #: `http://` target refused correctly and crashed, and the consumer saw `1`.
 #: A tuple rather than a chain of `except` clauses, so adding a refusal is one
 #: edit in one place and the test below can enumerate it.
-REFUSALS = (CredentialError, CertificatePinError)
+# PluginError joins these because a vertical that could not be loaded is a
+# refusal with something to say, not a traceback from somewhere downstream
+# about a vocabulary nobody supplied.
+REFUSALS = (CredentialError, CertificatePinError, PluginError)
 
 
 class _StdoutThatOutlivesItsReader:
@@ -1062,6 +1091,22 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout = stdout
     try:
         args = build_parser().parse_args(argv)
+        # Verticals load BEFORE anything is read. A vocabulary supplied after a
+        # declaration has been classified is a vocabulary that did not apply.
+        use_entry_points = not getattr(args, "no_entry_points", False)
+        _plugins.load_all(getattr(args, "plugin", None) or (),
+                          entry_points=use_entry_points)
+        if use_entry_points and not _vocabulary.registered():
+            # Entry points exist only in an INSTALLED distribution. Run from a
+            # source checkout -- `python -m bmc_sensor_audit.cli` -- there are
+            # none, and the vertical this package ships would never load. It is
+            # bundled, so it registers here, through the same `register()` an
+            # outside vertical calls; what it does not get is a private path
+            # that skips the door.
+            #
+            # `--no-entry-points` deliberately does NOT reach this: asking for a
+            # run with no vertical must still produce a run with no vertical.
+            _bundled.register()
         return args.func(args)
     except REFUSALS as error:
         print(f"{error}", file=sys.stderr)

@@ -23,11 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = ROOT / "tests" / "fixtures" / "upstream"
 sys.path.insert(0, str(ROOT / "src"))
 
-from bmc_sensor_audit.detect.feeder import (  # noqa: E402
+from presence_audit.feeder import (  # noqa: E402
     ENVELOPE_SCHEMA_VERSION, STUCK_AT_SAMPLE_FLOOR, evaluate, feed,
     unmapped_observations)
-from bmc_sensor_audit.detect.generator import READING, generate  # noqa: E402
-from bmc_sensor_audit.inventory.diff import compare  # noqa: E402
+from presence_audit.generator import READING, generate  # noqa: E402
+from presence_audit.diff import compare  # noqa: E402
 from bmc_sensor_audit.inventory.entity_manager import load_declaration  # noqa: E402
 from bmc_sensor_audit.inventory.redfish import walk_from_dict  # noqa: E402
 
@@ -53,7 +53,7 @@ class StubSession:
 @pytest.fixture(scope="module")
 def built():
     declaration = load_declaration([str(UPSTREAM)])
-    model, manifest = generate(declaration)
+    model, manifest = generate(declaration, domain_id="bmc-sensor-audit")
     return declaration, model, manifest
 
 
@@ -416,3 +416,94 @@ class TestTheEnvelopeSchemaVersionIsChecked:
         session.add_entity("e", "S", properties={"reading": 5.0})
         envelope = check(session).to_dict()
         assert envelope["meta"]["schema_version"] == ENVELOPE_SCHEMA_VERSION
+
+class TestTheDeclineVocabularyIsClassifiedAheadOfTheEngine:
+    """Every reason the pinned engine RANGE can emit has a bucket here.
+
+    The pin is `>=0.1.8,<0.2`, so a release inside it may add members to a closed
+    enum -- the engine's own compatibility document says a patch may, and says a
+    reader must treat the enum as three-valued. An unknown member lands in
+    `unclassified_declines`, which is correct and is also a `--strict` failure on
+    the day the pin moves, for cases this package has understood since 0.1.8.
+
+    Classified BEFORE that release rather than after it. Measured on one model
+    against both builds: a declared flow on a rail reading zero watts in declines
+    `not_applicable` on 0.1.9 and `undefined_for_values` on the next build, with
+    findings empty in both. Same fact, new name.
+    """
+
+    def _outcome(self, reason, **kw):
+        from presence_audit.feeder import evaluate, FeedResult, Manifest
+        envelope = {"findings": [], "not_checked": [
+            {"entity_id": "r1", "entity_type": "Rail", "indicator": "pin_w",
+             "axiom": "CONSERVATION", "reason": reason, "detail": "zero total"}]}
+        return evaluate(envelope, {}, Manifest(domain_id="bmc"),
+                        feed_result=FeedResult(), **kw)
+
+    @pytest.mark.parametrize("reason", ["not_applicable", "undefined_for_values",
+                                        "precondition_unmet", "no_threshold"])
+    def test_a_question_meaningless_on_these_values_does_not_fail_the_gate(self, reason):
+        outcome = self._outcome(reason)
+        assert outcome.inapplicable_declines, reason
+        assert not outcome.unclassified_declines, reason
+        assert outcome.exit_code == 0
+
+    def test_a_model_defect_fails_because_this_package_wrote_the_model(self):
+        """`missing_role` means a declaration the engine cannot run. The generator
+        emitted it, so nothing else will notice it."""
+        outcome = self._outcome("missing_role")
+        assert outcome.core_case_declines
+        assert outcome.exit_code == 1
+
+    def test_an_unknown_member_still_overflows_by_name(self):
+        """The control, and the one that matters most. Widening a closed set is
+        only safe while the overflow still works -- otherwise the next member the
+        engine adds is silently absorbed into whichever bucket sits nearest."""
+        outcome = self._outcome("a_reason_no_build_emits")
+        assert outcome.unclassified_declines
+        assert not outcome.inapplicable_declines
+        assert not outcome.core_case_declines
+
+    def test_strict_still_fails_on_every_decline_bucket(self):
+        """The buckets differ on the default exit and not under --strict. Pinned so
+        widening the vocabulary cannot quietly soften the strict contract."""
+        for reason in ("undefined_for_values", "precondition_unmet",
+                       "no_threshold", "a_reason_no_build_emits"):
+            assert self._outcome(reason, strict_declines=True).exit_code == 1, reason
+
+    def test_a_check_nobody_bounded_does_not_fail_the_default_gate(self):
+        """`no_threshold`, classified before the engine release that emits it.
+
+        An unreleased engine build makes MONOTONICITY's rate arm decline when
+        no rate is declared. This package emits MONOTONICITY for every counter
+        sensor and cannot supply a rate -- power-on hours climb at one per
+        3600 s and a correctable-ECC count has no published rate at all, and
+        declaring the axiom gets both arms with no way to take one. So every
+        counter on every healthy BMC produces one of these.
+
+        MEASURED before this line existed: it fell to `unclassified_declines`
+        and `--strict` went from 0 to 1 on every such board. Nothing in the
+        engine's own suite could see that; only calling `evaluate` could."""
+        outcome = self._outcome("no_threshold")
+        assert outcome.inapplicable_declines
+        assert not outcome.unclassified_declines
+        assert not outcome.core_case_declines, (
+            "a check nobody bounded is not the same as a declaration the engine "
+            "cannot run; folding it into the model-defect bucket would fail "
+            "every healthy board")
+        assert outcome.exit_code == 0
+
+    def test_it_is_its_own_set_rather_than_widening_an_older_one(self):
+        """The two sets share a bucket and do not share a meaning.
+
+        `_NOT_APPLICABLE_REASONS` means *the question is meaningless against the
+        values that arrived*; this means *nobody supplied the number*. Widening
+        the older set would have made its own comment false, which is the drift
+        this file keeps catching in itself."""
+        from presence_audit import feeder
+        assert "no_threshold" not in feeder._NOT_APPLICABLE_REASONS
+        assert "no_threshold" in feeder._NO_THRESHOLD_REASONS
+        assert not (feeder._NO_THRESHOLD_REASONS
+                    & feeder._NOT_APPLICABLE_REASONS)
+        assert not (feeder._NO_THRESHOLD_REASONS
+                    & feeder._MODEL_DEFECT_REASONS)

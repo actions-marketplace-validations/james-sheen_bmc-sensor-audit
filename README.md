@@ -21,10 +21,64 @@ diff between what that file declares and what the machine actually reports.
 
 ## Status
 
-**Released — 0.2.2**, tagged `v0.2.2`, Apache-2.0, on PyPI as
+**Released — 0.3.2**, tagged `v0.3.2`, Apache-2.0, on PyPI as
 [`bmc-sensor-audit`](https://pypi.org/project/bmc-sensor-audit/). The coverage
 diff works end to end and is exercised against the full upstream configuration
 corpus; the firmware regression gate and the liveness pass ship alongside it.
+
+**0.3.1 tells the core what a sensor is called.** `presence-audit` 0.1.2 stopped
+spelling one domain's nouns into its shared report and started asking the
+registered vertical for them. This package now answers, so its report reads as it
+always has. **Upgrade if you are on 0.3.0**: that release names no noun, its
+dependency range admits 0.1.2, and the pair prints `Point coverage` where every
+earlier version printed `Sensor coverage`. The floor moves to `>=0.1.2` for the
+same reason — below it the words are supplied and never asked for.
+
+**0.3.0 is a split, and it is why that was a major bump.** Everything that was
+never about a BMC — the protocol a vertical is written against, the three-valued
+presence diff, the regression gate, the report, the model generator and the
+attestation — is now `presence-audit`, a separate distribution with no
+dependencies of its own. This package keeps what only means something on a
+baseboard management controller: the Redfish client, the entity-manager reader,
+the sensor taxonomy, the declaration sources, the vertical and this command line.
+
+What that changes for a consumer: the plugin entry-point group is
+`presence_audit.plugins`, the environment variable is `PRESENCE_AUDIT_PLUGINS`,
+and the attestation and supplemental formats are named `presence-audit/...`.
+Files already written under the old format names are still read.
+
+**0.2.7 lets the plugin environment variable say what it documents.**
+`BMC_SENSOR_AUDIT_PLUGINS` is separated by `os.pathsep`, and on Linux that is a
+colon — the same character that introduces a callable. So every spec naming one
+was split down the middle, and the loader reported a missing module named after
+the half it had been handed. A spec is now read from the right: the last colon
+introduces the callable, guarded so a bare Windows path keeps its drive letter.
+Two dotless module names still cannot be told from one module and a callable,
+which is a property of the grammar rather than of the parser; name that pair with
+`--plugin` twice.
+
+**0.2.6 makes the published protocol the whole contract.** `core/protocols.py`
+is the document an outside vertical is written against, and it was narrower than
+what the code required: the diff and the regression gate iterated the capture and
+the declaration instead of reading `.points`, so an adapter implementing every
+member the protocol declares — and nothing more — could not run. Eight call sites
+now read `.points`. The bundled vertical never noticed, because this domain's own
+types are iterable for reasons of their own.
+
+Two verticals installed at once are now refused rather than ranked. Registration
+replaces, so the later entry point silently won and every classification, count
+key and finding came from a domain the caller was not auditing. Nothing said so.
+Choose one with `--plugin`, the environment variable, or `--no-entry-points`.
+
+**0.2.5 separates the machinery from the domain.** The presence diff, the
+regression gate, the report and the engine feed are typed on protocols rather
+than on this domain's classes, and everything that names a sensor — the
+taxonomy, the field rules, the peer grouping, the name templates — is supplied
+by a vertical registered through an entry point. Nothing a caller runs changes.
+What changes is that the same core now runs a domain this package was not
+written for: a factory-line vocabulary and a factory-line capture shape drive
+the same three-valued diff through the protocols alone, which is the measurement
+the split exists to produce rather than an argument that it worked.
 
 **0.2.2 keeps the verdict when the reader stops reading.** A report piped into
 `head` used to lose its exit code — a long one exited `1`, which means findings
@@ -131,7 +185,7 @@ belongs in this paragraph.
 | Mock BMC | working — serves either tree shape over real HTTP, with fault injection |
 | Reporting | working — human summary and JSON |
 | Hygiene check | working — 8 shipped rules plus a local vocabulary, over files and commit messages, versioned hooks, and a CI sweep neither can be forgotten past |
-| Tests | **714** collected with PyYAML installed, **688** with nothing. The difference is exactly `tests/test_action.py`, which reads the shipped `action.yml` and skips as a whole module when PyYAML is absent — so CI installs it; the `[detect]` extra adds an engine canary on top of both |
+| Tests | **811** collected with PyYAML installed, **785** with nothing. The difference is exactly `tests/test_action.py`, which reads the shipped `action.yml` and skips as a whole module when PyYAML is absent — so CI installs it; the `[detect]` extra adds an engine canary on top of both |
 | Liveness detection (Stage 2) | working — `detect` runs coverage and liveness in one pass, one exit code |
 | GitHub Action | working — composite, `uses: james-sheen/bmc-sensor-audit@action-v0`; the repository's own CI runs it as a consumer would and pins all three exit codes |
 | Fleet comparison | a separate tool — `fleet-sensor-baseline` reads `walk/1` and this one's exit codes, and never imports it |
@@ -589,8 +643,8 @@ which is how a repository ends up unable to release its own 1.0.
 
 | Tag | Versions | Installs |
 |---|---|---|
-| `v0.2.2` | the tool, on PyPI | — |
-| `action-v0` | this action, moving — tracks the latest `action-v0.x.y` | `bmc-sensor-audit>=0.2.2,<0.3`, with the `[detect]` extra when `mode: detect` |
+| `vX.Y.Z` | the tool, on PyPI | — |
+| `action-v0` | this action, moving — tracks the latest `action-v0.x.y` | `bmc-sensor-audit>=0.3.0,<0.4`, with the `[detect]` extra when `mode: detect` |
 
 **`action-v0`, not `action-v1`, on purpose.** A `1.0.0` is a promise that the
 input surface is stable and that breaking it costs a major bump. Nobody outside
@@ -720,9 +774,11 @@ declaration that every downstream generator trusts.
 
 Apache-2.0. See `LICENSE` and `NOTICE`.
 
-The same terms as `arbiter-engine`, which this depends on from Stage 2, and as
-OpenBMC's own `entity-manager`, which it reads. A consumer who already has both
-in their tree acquires no new licence obligation by adding this.
+The same terms as everything this depends on: `presence-audit`, which carries
+the declaration-against-capture core, and `arbiter-engine`, which Stage 2 asks
+for liveness. The same terms again as OpenBMC's own `entity-manager`, which this
+reads. A consumer who already has them in their tree acquires no new licence
+obligation by adding this.
 
 ## Hygiene
 

@@ -47,10 +47,23 @@ PLANTS = {
     "mac_address": 'MAC = "de:ad:be:ef:00:11"',  # hygiene: synthetic
     "redfish_inventory_field": '{"SerialNumber": "CN7082019L003A"}',  # hygiene: synthetic
     "repository_nickname": "pinned against the checker in repo #1",  # hygiene: synthetic
+    "personal_email": 'CONTACT = "a.person@somewhere.co.uk"',  # hygiene: synthetic
+    # Both of these are the shapes 0.1.0 actually published, reduced to a plant.
+    "scratch_path": 'WHERE = "/tmp/build-7f3a/venv/lib/python3.10/site-packages/thing"',  # hygiene: synthetic
+    "placeholder_digest": '{"export_sha256": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}',  # hygiene: synthetic
 }
 
 # Things that resemble a hazard and are not one. Each is present in real trees.
 NEAR_MISSES = [
+    # Publishable addresses. If these were hits, the rule would refuse the exact
+    # form it exists to steer people towards -- and the `Co-Authored-By` trailer
+    # this project puts in every message would fail every commit.
+    'j <someone@users.noreply.github.com>',  # hygiene: synthetic
+    'Co-Authored-By: X <noreply@anthropic.com>',  # hygiene: synthetic
+    'user.email = "t@example.com"',          # hygiene: synthetic
+    # Redfish annotations. Not addresses, and both are in this repo's fixtures.
+    '"Members@odata.count": 2',
+    '"Reading@Redfish.AllowableValues": []',
     'BASE = "http://127.0.0.1:8000"',        # the mock BMC binds loopback every run
     'DNS = "8.8.8.8"',                       # public address
     'HOST = "172.15.0.1"',                   # just outside RFC1918
@@ -69,6 +82,17 @@ NEAR_MISSES = [
     'reported a defect in the walker',
     'https://github.com/james-sheen/bmc-sensor-audit#readme',
     'repo number 3 in prose',
+    # A REAL digest under a digest-named key. If this fired, the rule would refuse
+    # the very thing it exists to ask for -- which is the failure mode a
+    # placeholder-detector is most likely to have.
+    '"export_sha256": "sha256:57d4581e126ebb19ada9d7a6bfcb8ad540ef97b8f0b717f513d8a2e89977dd1b"',
+    '"digest": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"',
+    # System paths, which are not anybody's scratch directory.
+    'exec = "/usr/bin/env python3"',
+    'prefix = "/usr/local/lib/python3.10"',
+    'OUT = "/tmp"',                          # a bare temp root names no run
+    # The honest replacement for the placeholder, which must not fire.
+    '"id": "zenodo:15719919 JiraReposAnon, range-fetched prefix"',
 ]
 
 # Values that LOOK like the placeholder above and are not. The narrowing that

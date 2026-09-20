@@ -137,7 +137,77 @@ RULES = [
          "have, so rewrite the sentence for someone who has only this repository "
          "-- there is no substitution that keeps it meaningful",
          re.IGNORECASE),
+
+    # A personal address, by SHAPE rather than by name.
+    #
+    # WHY IT CARRIES NO ADDRESS. A rule that spelled the address out would put it
+    # in five published repositories to keep it out of one -- the check leaking
+    # the thing it protects. So this matches the shape and subtracts the forms
+    # that are meant to be published.
+    #
+    # WHY A TLD LIST. `Members@odata.count` and `Reading@Redfish.AllowableValues`
+    # are Redfish annotations, not addresses, and a bare `\w+@\w+\.\w+` matches
+    # both -- they are in this repository's own fixtures. Requiring a real TLD
+    # separates them, and a TLD list is external and stable rather than a
+    # vocabulary of ours that rots. Measured against every tracked file in five
+    # repositories and the built engine tree: zero false positives.
+    #
+    # This does NOT reach the surface that actually leaked: a commit's AUTHOR is
+    # neither message nor file, so no text scanner sees it. That is checked by
+    # the hook and again on the server, where the author can be read.
+    Rule("personal_email",
+         r"(?<![\w.-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\."
+         r"(?:com|org|net|edu|gov|mil|int|io|dev|app|ai|co|me|xyz|info|biz|"
+         r"uk|tw|cn|jp|de|fr|nl|se|no|es|it|ru|in|br|au|ca|ch|kr|hk|sg)(?![\w-])",
+         "an email address. Publish a `users.noreply.github.com` address or an "
+         "`example.com` one; anything else is a real inbox that a crawler will "
+         "read and that no later commit can withdraw",
+         re.IGNORECASE),
+
+    # BOTH OF THESE SHIPPED IN 0.1.0, and this sweep had no rule that could see
+    # either. They are here because an outside reader found them by reading package
+    # data, which is the surface a leak scanner is least likely to be pointed at.
+    #
+    # The absolute path was `engine_floors.json`'s `engine_file`: the full path of a
+    # scratch virtualenv on the machine that ran the probe, inside the published wheel.
+    # Nothing read the field, which is exactly why nothing caught it.
+    # Scoped to what `home_path` above does NOT reach. That rule covers /home, /Users
+    # and /root; the path that actually shipped was under /tmp, and a scratch
+    # virtualenv is where a probe writing package data naturally runs. Two rules rather
+    # than one widened rule, so each keeps a reason a reader can check.
+    Rule("scratch_path",
+         r"(?<![\w/])/(?:tmp|var/tmp|private/var/folders)/[\w.@+-]+/[\w./@+-]+",
+         "an absolute path under a temporary directory, which names the machine that "
+         "wrote this and one run on it. In package data it ships inside the wheel: "
+         "0.1.0 published the full path of a scratch virtualenv this way, in a field "
+         "nothing read. Record a module name, a relative path, or nothing",
+         0),
+
+    # The placeholder digest was `evidence/jira-capture.json`'s `export_sha256`:
+    # sixty-four `z` characters in a field named as a hash, in published evidence.
+    # A reader has no way to tell a filler value from a real one, so the field says
+    # *this was verified* while verifying nothing.
+    #
+    # Matched on the VALUE being a single repeated character or an obvious filler
+    # word, not on the field name -- a rule keyed on names would need every name
+    # anybody invents. Hex-looking real digests are not single-character runs, so
+    # this does not fire on them; the test beside it proves both directions.
+    Rule("placeholder_digest",
+         r"(?i)\"(?:[a-z_]*(?:sha256|sha1|md5|digest|checksum|hash)[a-z_]*)\"\s*:\s*"
+         r"\"(?:([0-9a-zA-Z])\1{15,}|x{8,}|TODO\b[^\"]*|FIXME\b[^\"]*|"
+         r"placeholder[^\"]*|changeme[^\"]*)\"",
+         "a field named as a digest holding a placeholder. Compute the real one, or "
+         "rename the field so it does not claim something was verified. Published "
+         "evidence carrying a filler hash is worse than evidence carrying none",
+         0),
 ]
+
+#: Addresses that are meant to be published, subtracted from `personal_email`.
+#: Kept beside the rule rather than inside its pattern so the exception is
+#: legible as an exception.
+PUBLISHABLE_EMAIL = re.compile(
+    r"@(?:users\.)?noreply\.github\.com$|@example\.(?:com|org|net)$"
+    r"|^noreply@anthropic\.com$", re.IGNORECASE)
 
 
 # Site-specific vocabulary lives here, untracked. A rule that forbids a private
@@ -205,6 +275,26 @@ def _tracked_and_untracked(root: Path) -> list[Path]:
     return [p.relative_to(root) for p in sorted(root.rglob("*")) if p.is_file()]
 
 
+def _matches_in(line: str, rules: list[Rule]):
+    """Yield `(rule, text)` for every rule that fires on `line`.
+
+    ONE matcher for both scanners. The file scan and the message scan each had
+    their own copy of this loop, and the `personal_email` exception was added to
+    the message one alone -- so `t@example.com`, allowlisted in a commit message,
+    was still refused in a test fixture. A rule with two implementations has two
+    behaviours, and the second is the one nobody exercises.
+    """
+    for rule in rules:
+        for found in rule.pattern.finditer(line):
+            # `personal_email` matches a SHAPE, and some addresses of that shape
+            # are meant to be published. `finditer` rather than `search` so a
+            # publishable address early in a line cannot hide a real one after it.
+            if rule.name == "personal_email" and PUBLISHABLE_EMAIL.search(found.group(0)):
+                continue
+            yield rule, found.group(0)
+            break
+
+
 def scan(paths: list[Path], root: Path,
          rules: list[Rule] | None = None) -> list[tuple[Path, int, Rule, str]]:
     if rules is None:
@@ -221,10 +311,8 @@ def scan(paths: list[Path], root: Path,
         for number, line in enumerate(text.splitlines(), start=1):
             if EXEMPT.search(line):
                 continue
-            for rule in rules:
-                found = rule.pattern.search(line)
-                if found:
-                    hits.append((relative, number, rule, found.group(0)))
+            for rule, text_found in _matches_in(line, rules):
+                hits.append((relative, number, rule, text_found))
     return hits
 
 
@@ -245,10 +333,8 @@ def scan_text(text: str, label: str, rules: list[Rule]) -> list[tuple[Path, int,
     for number, line in enumerate(text.splitlines(), start=1):
         if EXEMPT.search(line):
             continue
-        for rule in rules:
-            found = rule.pattern.search(line)
-            if found:
-                hits.append((Path(label), number, rule, found.group(0)))
+        for rule, text_found in _matches_in(line, rules):
+            hits.append((Path(label), number, rule, text_found))
     return hits
 
 
