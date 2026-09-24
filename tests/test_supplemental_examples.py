@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 
 from presence_audit.generator import generate, peer_property
-from presence_audit.supplemental import (FORMAT, load_supplemental,
-                                                  unmatched_names)
+from presence_audit.supplemental import (ACCEPTED_FORMATS, load_supplemental,
+                                         unmatched_names)
 from bmc_sensor_audit.inventory.entity_manager import load_declaration
 from presence_audit.report import supplemental_as_text
 
@@ -52,7 +52,20 @@ class TestEveryShippedFileIsWellFormed:
         assert files, "no supplemental examples ship"
         for path in files:
             supplemental = load_supplemental(path)
-            assert json.loads(path.read_text())["format"] == FORMAT
+            # AN ACCEPTED FORMAT, NOT THE NEWEST ONE. This pinned equality with
+            # the newest id, which made every core format bump a break here: the
+            # core
+            # keeps reading the earlier ids precisely so a file written before a
+            # bump stays valid, and requiring the newest threw that away and made
+            # these examples rev in lockstep with a package they only read.
+            #
+            # What still has to hold is that the file loads, which is the claim
+            # this class is titled for. A file using a block that needs a newer
+            # id is refused by the loader itself, naming the id to use -- so the
+            # case this equality was reaching for is already covered one layer in.
+            declared = json.loads(path.read_text())["format"]
+            assert declared in ACCEPTED_FORMATS, (
+                f"{path.name} declares {declared!r}, which no build reads")
             assert supplemental.provenance, f"{path.name} says nothing about itself"
 
     def test_every_entry_carries_a_basis_that_says_something(self):
