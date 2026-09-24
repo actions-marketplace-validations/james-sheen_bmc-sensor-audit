@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print this project's RUNTIME dependencies, one per line.
+"""Print this project's RUNTIME dependencies, one per line -- or an extra's.
 
 CI deliberately does not install this package: a test asserting that a bare
 module path fails without `PYTHONPATH` has to stay a real negative, and an
@@ -16,10 +16,20 @@ the drift is invisible until the day the two disagree about something.
 
 `tomllib` is 3.11+, and the version matrix starts at 3.10, so the fallback is
 not laziness -- it is the older interpreter this has to run on.
+
+`--extra <name>` PRINTS ONE OPTIONAL GROUP, and it was added the day the
+sentence above came true for the thing it did not cover. The engine canary
+installed `arbiter-engine>=0.1.8,<0.2` written out in its own YAML, under a
+comment saying *the range is what a consumer actually gets, so the range is
+what gets tested*. It was testing a COPY of the range. The day the real one
+moved, the canary went on installing the old one, the suite's pin guard
+refused, and the job failed for a reason that had nothing to do with the
+engine's behaviour -- which is the one thing a canary must never do.
 """
 
 from __future__ import annotations
 
+import argparse
 import pathlib
 import re
 import sys
@@ -45,8 +55,44 @@ def runtime_dependencies(text: str) -> list[str]:
     return re.findall(r'"([^"]+)"', block.group(1))
 
 
+def extra_dependencies(text: str, name: str) -> list[str]:
+    """One `[project.optional-dependencies]` group, in declaration order.
+
+    Refuses an unknown name rather than printing nothing: an empty install list
+    is indistinguishable from a successful one, and a canary that installs
+    nothing passes every behavioural assertion it makes about a dependency it
+    has not got.
+    """
+    groups = {}
+    try:
+        import tomllib
+        groups = tomllib.loads(text).get("project", {}).get(
+            "optional-dependencies", {})
+    except ModuleNotFoundError:
+        section = re.search(
+            r"^\[project\.optional-dependencies\](.*?)(?=^\[|\Z)",
+            text, re.S | re.M)
+        if section:
+            for key, body in re.findall(
+                    r"^(\w[\w-]*)\s*=\s*\[(.*?)\]", section.group(1),
+                    re.S | re.M):
+                groups[key] = re.findall(r'"([^"]+)"', body)
+    if name not in groups:
+        raise SystemExit(
+            f"no `{name}` extra in pyproject.toml; declared: "
+            f"{sorted(groups)}")
+    return list(groups[name])
+
+
 def main() -> int:
-    deps = runtime_dependencies((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--extra", metavar="NAME",
+                        help="print this optional-dependency group instead of "
+                             "the runtime dependencies")
+    args = parser.parse_args()
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    deps = (extra_dependencies(text, args.extra) if args.extra
+            else runtime_dependencies(text))
     for dep in deps:
         print(dep)
     return 0
