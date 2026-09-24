@@ -1,27 +1,44 @@
 {
-  "format": "presence-audit/supplemental/1",
-  "provenance": "TEMPLATE -- states nothing about any board. Copy it, replace every REPLACE_ME name with a sensor name your configuration actually declares, and replace every basis with what establishes the claim on YOUR hardware. Then put your own sentence here saying who established these and how. The names below are placeholders on purpose: they match no declaration, so a run against this file unedited stops and names them rather than checking nothing and passing.",
-  "redundant_groups": [
-    {
-      "sensors": ["REPLACE_ME_FAN_A_TACH", "REPLACE_ME_FAN_B_TACH"],
-      "tolerance": 0.1,
-      "basis": "REPLACE_ME -- what makes these the same measurement. A schematic revision and sheet showing the two tachometers on one rotor pair is the shape of answer that belongs here. What does NOT belong: that the names look alike, that the thresholds match, or that the part exposes two channels. A TMP421's two channels are its own die and an external diode and differ by tens of degrees on a working board; six SLED sensors in the vendored corpus carry four identical thresholds and sit on six different parts. Both of those pairings look right and are wrong, and a wrong pairing reports disagreement between two things that were never the same measurement -- a false positive that looks exactly like the feature working."
-    }
-  ],
-  "counters": [
-    {
-      "sensor": "REPLACE_ME_POWER_ON_HOURS",
-      "direction": "increasing",
-      "allow_reset": true,
-      "basis": "REPLACE_ME -- what makes this reading cumulative rather than instantaneous. allow_reset says whether the counter returns to zero on a power cycle or a firmware update; if it does and this says otherwise, every reset is reported as the counter going backwards."
-    }
-  ],
-  "flows": [
-    {
-      "input": "REPLACE_ME_PSU0_PIN",
-      "outputs": ["REPLACE_ME_PSU0_POUT"],
-      "loss_margin": 0.1,
-      "basis": "REPLACE_ME -- what makes the outputs the same power as the input, minus conversion loss. Both readings must belong to ONE device: a flow across two supplies asserts that power entering one leaves the other. loss_margin is a FRACTION of the input, so 0.1 tolerates losing a tenth of it, and the number is the supply's efficiency figure off its datasheet. Delete the line if you do not have that figure -- but know that the engine then applies its own default, which is a number nobody here chose."
-    }
-  ]
+ "format": "presence-audit/supplemental/2",
+ "provenance": "TEMPLATE -- states nothing about any board. Copy it, replace every REPLACE_ME name with a sensor name your configuration actually declares, and replace every basis with what establishes the claim on YOUR hardware. Then put your own sentence here saying who established these and how. sampling_interval_s is the cadence YOUR collector walks at, in seconds, and it is not decoration: a coupling's propagation_delay_s has to be a whole number of those steps or the two series cannot be aligned at all. The names below are placeholders on purpose: they match no declaration, so a run against this file unedited stops and names them rather than checking nothing and passing.",
+ "redundant_groups": [
+  {
+   "sensors": [
+    "REPLACE_ME_FAN_A_TACH",
+    "REPLACE_ME_FAN_B_TACH"
+   ],
+   "tolerance": 0.1,
+   "basis": "REPLACE_ME -- what makes these the same measurement. A schematic revision and sheet showing the two tachometers on one rotor pair is the shape of answer that belongs here. What does NOT belong: that the names look alike, that the thresholds match, or that the part exposes two channels. A TMP421's two channels are its own die and an external diode and differ by tens of degrees on a working board; six SLED sensors in the vendored corpus carry four identical thresholds and sit on six different parts. Both of those pairings look right and are wrong, and a wrong pairing reports disagreement between two things that were never the same measurement -- a false positive that looks exactly like the feature working."
+  }
+ ],
+ "counters": [
+  {
+   "sensor": "REPLACE_ME_POWER_ON_HOURS",
+   "direction": "increasing",
+   "allow_reset": true,
+   "basis": "REPLACE_ME -- what makes this reading cumulative rather than instantaneous. allow_reset says whether the counter returns to zero on a power cycle or a firmware update; if it does and this says otherwise, every reset is reported as the counter going backwards."
+  }
+ ],
+ "flows": [
+  {
+   "input": "REPLACE_ME_PSU0_PIN",
+   "outputs": [
+    "REPLACE_ME_PSU0_POUT"
+   ],
+   "loss_margin": 0.1,
+   "basis": "REPLACE_ME -- what makes the outputs the same power as the input, minus conversion loss. Both readings must belong to ONE device: a flow across two supplies asserts that power entering one leaves the other. loss_margin is a FRACTION of the input, so 0.1 tolerates losing a tenth of it, and the number is the supply's efficiency figure off its datasheet. Delete the line if you do not have that figure -- but know that the engine then applies its own default, which is a number nobody here chose."
+  }
+ ],
+ "sampling_interval_s": 300,
+ "couplings": [
+  {
+   "from": "REPLACE_ME_FAN_A_TACH",
+   "to": "REPLACE_ME_OUTLET_TEMP",
+   "propagation_delay_s": 300,
+   "time_constant_s": 900,
+   "response_model": "exponential",
+   "gain": "estimate",
+   "basis": "REPLACE_ME -- what makes the first reading DRIVE the second. An airflow or thermal design document showing that this fan moves the air this thermistor sits downstream of is the shape of answer that belongs here. What does NOT belong: that the two readings correlate. Correlation is what the engine FITS once you have declared the coupling, so offering it as the basis is circular -- and on a board where one controller drives the fan FROM that temperature, the correlation is real and the causal direction is the reverse of what you wrote. What also does not belong: that both sit on the same board, or that the names look related. DIRECTION IS PART OF THE CLAIM: an inlet thermistor reads the air arriving at the chassis and a fan does not change the room, so fan-to-inlet is the pairing that looks obvious and is usually backwards. Prefer a reading downstream of the airflow. gain is left as `estimate` on purpose: it withholds the coefficient and lets the engine fit one from history, report it with its n, its r_squared and an interval, and project NOTHING until a person writes a number down. Replace it with a number only if you have a thermal coefficient, and then add gain_basis saying where that number came from. propagation_delay_s and time_constant_s are how long the change takes to arrive and how fast it settles once it does; the delay must be a multiple of sampling_interval_s above."
+  }
+ ]
 }
