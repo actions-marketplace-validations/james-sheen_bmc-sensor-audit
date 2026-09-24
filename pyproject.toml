@@ -58,7 +58,17 @@ dependencies = ["presence-audit>=0.1.7,<0.2"]
 # 0.1.8 passes. The declared floor had been 0.1.6 and was already false by one release
 # before anybody re-derived it -- a pin is a claim, and this one had never been
 # measured after the engine grew the behaviour Stage 2 came to depend on.
-detect = ["arbiter-engine>=0.1.8,<0.2"]
+#
+# THE CEILING MOVED TO 0.2 ON A MEASUREMENT, 2026-09-24. `<0.2` had held since
+# the engine's 0.1 line and was never re-derived against a 0.2 release, so it
+# was a claim about a boundary nobody had crossed. Measured on 0.2.4: 851 passed, 14 skipped, with the SAME skip set as
+# 0.1.18 -- read by name and not by count, because a skip keeps the collected
+# total and a tier can go quiet under an unchanged number.
+# The floor is raised with it rather than left low: a range is a claim about
+# every release inside it, and nothing between 0.1.8 and 0.2.4 was run
+# against this suite on the day the ceiling moved. The old floor's reason is
+# above and still holds; it is no longer the boundary this package sits on.
+detect = ["arbiter-engine>=0.2.4,<0.3"]
 dev = ["pytest>=7"]
 
 [project.scripts]
