@@ -634,7 +634,23 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
         handle.write(yaml.safe_dump(model))
         model_path = handle.name
-    session = EngineSession()
+    # A RESIDENT session when the operator asks for one. The engine has kept a
+    # durable prediction ledger since 0.2.3 and `SqlitePredictionLedger` became
+    # a supported top-level name in 0.2.6; until now nothing here constructed
+    # one, so every prediction this bridge filed died with the process and
+    # `calibration()` had no earlier horizon to grade against.
+    #
+    # NO EXTRA IS DECLARED FOR THIS, and that is measured rather than assumed:
+    # the ledger imports nothing outside the standard library, and the engine
+    # itself publishes no `resident` extra. An extra that installs nothing is
+    # ceremony, and a caller who pip-installed it would be told they had gained
+    # a capability they already had.
+    ledger = None
+    if getattr(args, "ledger", None):
+        from arbiter_engine import SqlitePredictionLedger
+
+        ledger = SqlitePredictionLedger(args.ledger)
+    session = EngineSession(ledger=ledger) if ledger else EngineSession()
     session.load_model(model_path)
 
     feed_result = feed(session, manifest, reports)
@@ -964,6 +980,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="what the artifact should call the target instead of "
                              "its URL; a BMC hostname names an internal machine and "
                              "an artifact uploaded from CI publishes it")
+    detect.add_argument("--ledger", metavar="PATH",
+                        help="keep this run's predictions in a SQLite file so a "
+                             "later run can be graded against them; without it "
+                             "the engine keeps them in memory and they are gone "
+                             "when the process exits")
     detect.set_defaults(func=_cmd_detect)
 
     validate = subparsers.add_parser(
