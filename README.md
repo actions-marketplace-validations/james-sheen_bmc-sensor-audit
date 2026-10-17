@@ -26,6 +26,14 @@ diff between what that file declares and what the machine actually reports.
 diff works end to end and is exercised against the full upstream configuration
 corpus; the firmware regression gate and the liveness pass ship alongside it.
 
+**0.3.19 counts a corpus.** `census` counts every configuration under a directory
+-- normally an `entity-manager` checkout's `configurations/` -- exactly as this tool
+reads it, and names the commit it counted, dated by when it was committed, and
+whether any file under it differs from that commit; outside a checkout it says it
+names no revision. The corpus counts in this README are now what it prints at the
+pinned revision, which corrected three of them -- one had divided a current count
+by an older one.
+
 **0.3.18 says what the place a fault stops explains.** Under each walk line,
 `detect` prints, for each sensor where the visible fault stops, what it explains
 below it -- the sensors downstream along declared fault channels that show a
@@ -306,7 +314,7 @@ belongs in this paragraph.
 | Mock BMC | working — serves either tree shape over real HTTP, with fault injection |
 | Reporting | working — human summary and JSON |
 | Hygiene check | working — 8 shipped rules plus a local vocabulary, over files and commit messages, versioned hooks, and a CI sweep neither can be forgotten past |
-| Tests | **953** collected with PyYAML installed, **924** with nothing. The difference is exactly `tests/test_action.py`, which reads the shipped `action.yml` and skips as a whole module when PyYAML is absent — so CI installs it; the `[detect]` extra adds an engine canary on top of both |
+| Tests | **974** collected with PyYAML installed, **945** with nothing. The difference is exactly `tests/test_action.py`, which reads the shipped `action.yml` and skips as a whole module when PyYAML is absent — so CI installs it; the `[detect]` extra adds an engine canary on top of both |
 | Liveness detection (Stage 2) | working — `detect` runs coverage and liveness in one pass, one exit code |
 | GitHub Action | working — composite, `uses: james-sheen/bmc-sensor-audit@action-v0`; the repository's own CI runs it as a consumer would and pins all three exit codes |
 | Fleet comparison | a separate tool — `fleet-sensor-baseline` reads `walk/1` and this one's exit codes, and never imports it |
@@ -379,6 +387,13 @@ PYTHONPATH=src python3 -m bmc_sensor_audit.cli validate-attestation attestation.
 
 The format is documented in
 [`docs/attestation-format.md`](docs/attestation-format.md).
+
+What a whole configuration corpus declares, at the revision a checkout holds --
+see [counting a corpus](#counting-a-corpus):
+
+```
+PYTHONPATH=src python3 -m bmc_sensor_audit.cli census <entity-manager-checkout>/configurations
+```
 
 A recorded walk is checkable the same way, and by the person who receives one:
 
@@ -566,8 +581,9 @@ a disabled sensor does not appear in most BMC web UIs at all.
 **Not every `Exposes` entry is a sensor**, and treating them alike is how a tool
 reports a healthy board as broken. PID control loops, stepwise fan curves, EEPROMs,
 firmware images, I2C muxes and GPIO presence detectors are declared exactly like
-sensors and can never appear in a Redfish `Sensors` collection — **2,069 of 8,809
-upstream declarations, about 23 %**, measured at the pinned revision. They are
+sensors and can never appear in a Redfish `Sensors` collection — **2,069 of the
+9,424 upstream declarations at the pinned revision, about 22 %**, as `census` counts
+them. They are
 classified out of the expectation and counted, never silently dropped.
 
 The classification is **three-valued for the same reason presence is**: a `Type` this
@@ -586,9 +602,10 @@ watches readings**, and running the reader across the upstream corpus found two.
 ## What reading the real configs changed
 
 The parser is shaped by measuring the upstream configuration corpus rather than
-by reading the format documentation. Every number below was derived at
-`openbmc/entity-manager@0ada0483` — **349 files** — and is stated with that basis
-because a count without one cannot be re-derived, only believed.
+by reading the format documentation. Every number below is what
+[`census`](#counting-a-corpus) prints at `openbmc/entity-manager@0ada0483` —
+**349 files** — and is stated with that basis because a count without one cannot
+be re-derived, only believed.
 
 Five things the documented example does not prepare you for, each of which
 silently corrupts a naive implementation:
@@ -600,7 +617,8 @@ silently corrupts a naive implementation:
   remaining ten being the JSONC files above, whose top level a strict parser
   never sees at all.
 - **One `Exposes` entry can declare several sensors.** Hot-swap controllers carry
-  a `Label` per rail; 1,132 entries use them and one declares 33. Counting
+  a `Label` per rail; 1,233 entries declare 5,617 rails in a `Labels` array, and
+  one declares 33. Counting
   entries counts boards, not sensors. **The rail set comes from the entry's
   `Labels` array, which declares it** — not from its thresholds, which are only a
   proxy for it. Across the vendored files `Labels` declares 149 rails and 34 carry
@@ -608,8 +626,8 @@ silently corrupts a naive implementation:
   expected them and their absence could never be reported. A rail naming itself
   through `<label>_Name` takes that name, because that is the name the machine
   publishes.
-- **709 of 8,809 declared sensor names are runtime templates** — about one in
-  twelve (`$bus`, `$address`, `$index`). Compared literally, every one of them
+- **820 of 9,424 declared sensor names are runtime templates** — about one in
+  eleven (`$bus`, `$address`, `$index`). Compared literally, every one of them
   reads as missing on a healthy board. `CONFIG_FORMAT.md` documents three such
   variables; the corpus uses five.
 - **The threshold-name vocabulary has fifteen spellings, not four.** `Direction`
@@ -617,6 +635,44 @@ silently corrupts a naive implementation:
   what decides which side a threshold guards. A name whose severity level is
   unrecognised is reported rather than discarded: a closed enum with a missing
   member misclassifies confidently instead of failing.
+
+## Counting a corpus
+
+Every count this README gives for the upstream corpus is one `census` prints, and
+anyone can print it again:
+
+```
+git clone https://github.com/openbmc/entity-manager
+bmc-sensor-audit census entity-manager/configurations
+```
+
+It reads exactly as `declare` and `coverage` read -- the same parse, the same
+classification of a `Type`, the same rule for a threshold whose name contradicts its
+`Direction` -- and counts the files and how they are written, the declarations by
+kind and by `Type`, the runtime templates and the variables they use, the `Labels`
+rails and those no threshold names, and the thresholds by `Direction` and by the
+spelling of their name, listing each contradiction by file. `--json` prints the same
+as `bmc-sensor-audit/census/1`, every type included.
+
+**A count is half a claim; the revision is the other half.** Between
+`0ada0483` and `495e0a4a`, nine weeks apart, the corpus went from 349 files to 362
+and from 9,424 declarations to 10,971, while every shape above held and both upstream
+defects stayed where they were. So `census` prints the commit the directory is checked
+out at, dated by its commit date rather than its author date -- a change can be
+written weeks before it is committed into the tree -- and the number of paths under
+the directory that differ from that commit. For a directory outside a checkout, or
+one its checkout does not track, it names no revision and says so. It also names the
+version that counted, because what counts as one declaration has changed between
+releases of this tool: a reader that splits `Labels` rails and further channels into
+sensors of their own counts more of them in the same files.
+
+It exits `2` when there is nothing to count -- no configuration file, or files that
+declare no sensor -- and when a file could not be read, since the counts are then of
+part of the corpus. Otherwise it exits `0`: a census counts, and finds nothing wrong.
+
+Thirteen of the upstream files are vendored verbatim under `tests/fixtures/upstream/`,
+pinned to `0ada048303bb007c9d7ec3a6a90433169f05dd99`, so every parser finding above
+runs from a clone; `tests/fixtures/upstream/README.md` says what each file is for.
 
 ## The firmware regression gate
 
@@ -1062,7 +1118,9 @@ Both are hot-swap controller temperature thresholds named `upper critical` and
 given `Direction: less than`, in `meta/fbyv2.json` and `meta/fbyv35.json`. The
 named condition cannot alarm, and the healthy range does. This is the same
 polarity inversion the tool is built to catch downstream, sitting in the
-declaration that every downstream generator trusts.
+declaration that every downstream generator trusts. `census` lists every such
+threshold at whatever revision a checkout holds; at `0ada0483` and at `495e0a4a`
+it lists these two and no other.
 
 ## Licence
 
@@ -1171,18 +1229,7 @@ a diff is safe to publish.
   observation**: the rule that built them is the rule that grows them, and a set
   extended to match one machine is a set that agrees with that machine by
   construction.
-- **The corpus-wide totals are still not reproducible, though the findings now
-  are.** Thirteen upstream configurations are vendored verbatim under
-  `tests/fixtures/upstream/`, with Intel's copyright and the upstream licence
-  carried alongside, and every documented parser finding is now runnable from a
-  clone, **pinned to `0ada048303bb007c9d7ec3a6a90433169f05dd99`**. What they
-  cannot reproduce are the corpus-wide counts — 349 files, 8,809 sensors, 709
-  templated names, 15,860 thresholds — which need the full corpus. The first
-  attempt at this directory was unpinned, and within a day two of its nine files
-  had been renamed upstream and every count had moved; the shapes did not.
-  `tests/fixtures/upstream/README.md` records what each file is for, what the set
-  does not cover, and one open lead it found.
-- **Two recordings are real; the rest are synthetic.**
+- **Three recordings are real; the rest are synthetic.**
   `tests/fixtures/walk_qemu_bletchley.json` was captured from upstream `bmcweb`
   under QEMU and proves the modern `Sensors` shape against firmware this project
   did not write. `tests/fixtures/stuck_at_qemu_bletchley.json` is 28 consecutive
@@ -1193,9 +1240,11 @@ a diff is safe to publish.
   still is derivable from the recording itself, and over the driven phase the
   engine's verdict equals that derived set exactly. Freezing a register through an
   emulator monitor is an experiment, not a sensor failure, and the fixture says so.
-  The two `walk_*_tree.json` fixtures remain generated by this
-  project's own mock, and the deprecated `Thermal`/`Power` shape is still proven
-  only by them. The capture also has a floor of its own: QEMU wires a subset of
-  the board's devices, so the population is partial by construction, and a
+  The third, `tests/fixtures/redfish_witherspoon_2_9_0.json`, proves the
+  deprecated `Thermal` shape against the 2.9.0 witherspoon image (above). The two
+  `walk_*_tree.json` fixtures remain generated by this project's own mock, and the
+  deprecated `Power` shape is still proven only by them. The bletchley capture
+  also has a floor of its own: QEMU wires a subset of the board's devices, so the
+  population is partial by construction, and a
   synthetic FRU had to be written into the emulated EEPROM before entity-manager
   would instantiate the board at all.

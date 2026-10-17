@@ -3,6 +3,7 @@
     bmc-sensor-audit coverage   --config <path> --target https://<bmc> [--insecure]
     bmc-sensor-audit coverage   --config <path> --walk recorded-walk.json
     bmc-sensor-audit declare    --config <path>
+    bmc-sensor-audit census     <entity-manager checkout>/configurations
     bmc-sensor-audit regression --before before.json --after after.json
 
 `--config` accepts a file or a directory, and a directory is walked recursively,
@@ -38,6 +39,7 @@ from .inventory.declaration_source import (DeclarationSourceError,
                                            load_declaration_source, merge_sources)
 from presence_audit import exit_contract as _exit_contract
 from presence_audit.diff import compare
+from .inventory.census import census_as_text, take_census
 from .inventory.entity_manager import load_declaration
 from .inventory.redfish import (CertificatePinError, RedfishClient, Walk,
                                 WalkFileError, order_walks, validate_walk,
@@ -380,6 +382,43 @@ def _cmd_declare(args: argparse.Namespace) -> int:
 
     # An unreadable config is not a clean board; it is an unknown one.
     return EXIT_INCOMPLETE if declaration.unreadable else EXIT_CLEAN
+
+
+def _cmd_census(args: argparse.Namespace) -> int:
+    """Count a corpus, and refuse the same nothing `declare` refuses.
+
+    A census of a path that holds no configuration file, or whose files declare no
+    sensor, prints honest zeros -- which read exactly like a corpus that declares
+    nothing. So those exit 2, as `declare` does; and so does a census that could not
+    read every file, because its counts are then of part of the corpus.
+    """
+    root = Path(args.directory)
+    if not root.is_dir():
+        print(f"{args.directory} is not a directory. Name the directory the "
+              "configurations are in -- for an entity-manager checkout, its "
+              "`configurations/`", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    census = take_census(args.directory)
+    print(json.dumps(census, indent=1) if args.json
+          else census_as_text(census, top=args.top))
+
+    files, declared = census["files"], census["declarations"]["total"]
+    if not files["found"]:
+        print("no configuration file was found under the given directory -- "
+              "check the path", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    if not declared:
+        print(f"{files['found']} file(s) found, none of which declares a sensor. "
+              "Nothing here is a corpus to count -- check the path names a "
+              "configuration directory and not, say, a schema directory.",
+              file=sys.stderr)
+        return EXIT_INCOMPLETE
+    if files["unreadable"]:
+        print(f"{len(files['unreadable'])} file(s) could not be read, so these "
+              "counts are of part of the corpus and leave out whatever those "
+              "files declare.", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    return EXIT_CLEAN
 
 
 def _with_declaration_sources(declaration, paths):
@@ -2106,6 +2145,18 @@ def build_parser() -> argparse.ArgumentParser:
                          help="the firmware version the walk was taken at; discovered "
                               "inventory moves with firmware")
     declare.set_defaults(func=_cmd_declare)
+
+    census = subparsers.add_parser(
+        "census", help="count what a whole configuration corpus declares, and "
+                       "name the revision counted")
+    census.add_argument("directory",
+                        help="the directory the configurations are in, e.g. an "
+                             "entity-manager checkout's configurations/")
+    census.add_argument("--json", action="store_true", help="machine-readable output")
+    census.add_argument("--top", type=int, default=10, metavar="N",
+                        help="how many of the largest not-a-sensor types to list "
+                             "(default 10; the JSON carries every type)")
+    census.set_defaults(func=_cmd_census)
 
     coverage = subparsers.add_parser(
         "coverage", help="diff a declaration against what a machine reports")
