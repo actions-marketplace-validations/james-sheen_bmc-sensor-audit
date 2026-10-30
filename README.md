@@ -21,10 +21,139 @@ diff between what that file declares and what the machine actually reports.
 
 ## Status
 
-**Released — 0.3.2**, tagged `v0.3.2`, Apache-2.0, on PyPI as
+**Released — 0.3.19**, tagged `v0.3.19`, Apache-2.0, on PyPI as
 [`bmc-sensor-audit`](https://pypi.org/project/bmc-sensor-audit/). The coverage
 diff works end to end and is exercised against the full upstream configuration
 corpus; the firmware regression gate and the liveness pass ship alongside it.
+
+**0.3.19 counts a corpus.** `census` counts every configuration under a directory
+-- normally an `entity-manager` checkout's `configurations/` -- exactly as this tool
+reads it, and names the commit it counted, dated by when it was committed, and
+whether any file under it differs from that commit; outside a checkout it says it
+names no revision. The corpus counts in this README are now what it prints at the
+pinned revision, which corrected three of them -- one had divided a current count
+by an older one.
+
+**0.3.18 says what the place a fault stops explains.** Under each walk line,
+`detect` prints, for each sensor where the visible fault stops, what it explains
+below it -- the sensors downstream along declared fault channels that show a
+finding now -- and the declared actions that apply to it. On the shipped board the
+fan is on no walk's frontier while it reads inside its bounds; stalled under its
+lower bound with the zone over its upper one, it explains the zone. The
+`[detect]` extra needs `arbiter-engine` 0.2.32.
+
+**0.3.17 says where a confirmed cause stood.** From `arbiter-engine` 0.2.31 a case
+keeps the walk, and `confirm` and `cases` print, beside the rank, where the cause stood
+on the last walk before it. Confirmed after sixteen cycles of this board the fan reads
+*ranked 1 of 1 (by its standing on the walk, not by posterior), screened on an
+unexplained walk*: the walk had read it sound, and the book counts that surprise.
+`cases` also counts the cases reopened. The `[detect]` extra needs `arbiter-engine`
+0.2.31.
+
+**0.3.16 pins where the walk ends.** The engine's `gaps` says, from `arbiter-engine`
+0.2.30, where each walk up from a finding ends, and the loop pins it on this board:
+after sixteen cycles the zone's finding is unexplained -- the fan, its only declared
+cause, reads sound -- and no relation without a causal direction offers another
+candidate. `detect` prints nothing new. The `[detect]` extra needs `arbiter-engine`
+0.2.30.
+
+**0.3.15 prints where the walk stopped.** Under each ranking `detect` prints the
+engine's walk up from the finding: `walk: open` with what each open cause still
+needs, `walk: traced` with where the fault stops, or `walk: unexplained` when every
+declared cause read clean or sits behind one that did. `read first:` appears only
+while a cause is still open. On this board the fan is open while its samples are
+short; once they run and find it inside its bounds the finding is unexplained, the
+true answer on a board whose only declared cause reads sound, and the fan is never
+named the place the fault stops. The `[detect]` extra needs `arbiter-engine` 0.2.27.
+
+**0.3.14 prints what each cause's own reading said.** Beside each cause the engine
+ranks, `detect` prints the cause's own reading as the engine computed it -- `own
+reading: faulty, critical`, say -- or `none` where it gave none. On this board the fan
+prints `none` while it reads inside its bounds: a check on it declined for too few
+samples, and the engine counts a candidate with a declined check as unread.
+
+**0.3.13 says what a ranking rested on, and places delayed channels by time.**
+`cases` prints beside each confirmed rank what decided it -- a posterior, or hop
+order where no strength is declared, as on this board -- and counts the first places
+a posterior decided apart from the rest. A board file may declare how long a failure
+takes to show along a fault channel, `propagation_delay_s` (presence-audit 0.2.6);
+`detect --walk` then refuses to run without `--by-capture-time`, since walks placed
+on the grid would have the engine read the cause at a time nobody took it. Recorded
+walks placed on the grid now say so. The `[detect]` extra needs `arbiter-engine`
+0.2.23.
+
+**0.3.12 prints the reading to take first, and keeps cases.** Beside each ranking
+`detect` prints `read first:`, the one reading the engine's ranking rests on most.
+With `--case-severity` and `--case-checks`, each finding opens a case in the
+`--ledger` file that every later walk is checked into, and `confirm` and `cases`
+record and read what settled one. The `[detect]` extra needs `arbiter-engine`
+0.2.20.
+
+**0.3.11 reads what engine 0.2.18 adds to the loop, except `plan`'s.** The board
+declares no objective, so `reaches` and `decisive` on a `plan` candidate have no plan
+to come from here, and nothing reads them; this line said *every field* until 0.3.13.
+The loop test now
+checks that `gaps` locates a supply whose input power does not reach its output --
+the board file declares that balance from the supply's own PMBus labels -- that a
+confirmed fan is read back against the ranking made before it, and that the ranking
+names the fan as the reading it rests on. The `[detect]` extra needs
+`arbiter-engine` 0.2.18; what the commands print is unchanged.
+
+**0.3.10 can place recorded walks by the time they were taken.** With
+`--by-capture-time`, `detect` and `adopt` put each walk in the collection slot its
+time falls in and judge the run as of the newest walk, so a missed reading or a
+missing walk is an empty slot. On `adopt`'s own fixture a miss at walk 191 then
+fits the true 0.004 on 197 pairs, where the order-placed run fits nothing. Without
+the flag nothing changes. `presence-audit` 0.2.4 is the floor.
+
+**0.3.9 no longer fits a coupling across a missed reading.** One missed reading
+used to put every earlier reading of that sensor a walk out of line with its
+partner, and `adopt` proposed a gain of the wrong sign: -0.0021 against a true
+0.004 on its own fixture. With `presence-audit` 0.2.3, now the floor, a coupled
+sensor is fed from its last miss on, and `adopt --list` prints what that left.
+
+**0.3.8 refuses a run over nothing.** A walk sensor with no name, or a walk file that is
+missing or is not JSON, is refused by name with exit 2 on `coverage`, `detect`,
+`regression` and `adopt`, where each crashed with exit 1, which reads as findings.
+`regression` refuses two walks holding no sensor instead of answering *No changes*,
+`declare` records an anomaly for a configuration entry with no name instead of
+dropping it, and `validate-attestation` flags an attestation that attests nothing.
+The loop test reads declines through the engine's own walker, so `detect` needs
+`arbiter-engine` 0.2.15.
+
+**0.3.7 speaks the core's `point` and names what could explain a finding.**
+`presence-audit` 0.1.13 named its subject `point`, and this package now writes and
+reads that name, while its reports keep every key and kind they carried: they
+are written as format 2, keyed on `point` and on `sensor`. `adopt` writes through
+the core's own writer, and every basis it leaves is byte for byte what it wrote
+before. The Mt. Jade example gains a fault channel — the zone's fan can fail into
+its ambient reading, the reverse of the coupling — and `detect` prints the
+engine's ranking of declared causes beside a finding. It needs `presence-audit`
+0.1.13 and, for `detect`, `arbiter-engine` 0.2.13.
+
+**0.3.6 keeps a resident run's walks, so a board run can end in an adopted
+gain.** `adopt` fits from walks, and a resident run kept its readings only in
+`--history`, so a day of grading a board left nothing to fit from.
+`--keep-walks DIR` writes each cycle's walk, named by its instant.
+`docs/burn-in.md` now sets out a board run end to end, written before any
+board has produced a figure: when each one can first exist, and what to record.
+
+**0.3.5 grades a coupling, and writes a fitted gain's spread beside it.** Each
+`detect` cycle now rolls the model forward from the driver's own forecast, so a
+coupling whose gain is written down files what it predicts for the reading it
+drives, and a later cycle grades it. Until now the roll-forward started from the
+current readings, which moves nothing when no action is scheduled, so no coupling
+was ever graded. `adopt` also writes the engine's proposed `gain_sigma` with a
+basis of its own, raising the file to supplemental format 3; that needs
+`presence-audit` 0.1.11.
+
+**0.3.4 files what it forecasts, and can keep running.** `detect --ledger`
+handed the engine a ledger and filed nothing into it; it now files the forecasts
+the model declares, `--history` keeps the readings a later run grades them
+against, and `--resident` grades each cycle's matured forecasts in one process.
+It needs `arbiter-engine` 0.2.9, the first that grades through a durable store.
+The Mt. Jade example gains a coupling whose basis is the platform's own
+fan-control configuration.
 
 **0.3.1 tells the core what a sensor is called.** `presence-audit` 0.1.2 stopped
 spelling one domain's nouns into its shared report and started asking the
@@ -185,7 +314,7 @@ belongs in this paragraph.
 | Mock BMC | working — serves either tree shape over real HTTP, with fault injection |
 | Reporting | working — human summary and JSON |
 | Hygiene check | working — 8 shipped rules plus a local vocabulary, over files and commit messages, versioned hooks, and a CI sweep neither can be forgotten past |
-| Tests | **824** collected with PyYAML installed, **798** with nothing. The difference is exactly `tests/test_action.py`, which reads the shipped `action.yml` and skips as a whole module when PyYAML is absent — so CI installs it; the `[detect]` extra adds an engine canary on top of both |
+| Tests | **974** collected with PyYAML installed, **945** with nothing. The difference is exactly `tests/test_action.py`, which reads the shipped `action.yml` and skips as a whole module when PyYAML is absent — so CI installs it; the `[detect]` extra adds an engine canary on top of both |
 | Liveness detection (Stage 2) | working — `detect` runs coverage and liveness in one pass, one exit code |
 | GitHub Action | working — composite, `uses: james-sheen/bmc-sensor-audit@action-v0`; the repository's own CI runs it as a consumer would and pins all three exit codes |
 | Fleet comparison | a separate tool — `fleet-sensor-baseline` reads `walk/1` and this one's exit codes, and never imports it |
@@ -258,6 +387,13 @@ PYTHONPATH=src python3 -m bmc_sensor_audit.cli validate-attestation attestation.
 
 The format is documented in
 [`docs/attestation-format.md`](docs/attestation-format.md).
+
+What a whole configuration corpus declares, at the revision a checkout holds --
+see [counting a corpus](#counting-a-corpus):
+
+```
+PYTHONPATH=src python3 -m bmc_sensor_audit.cli census <entity-manager-checkout>/configurations
+```
 
 A recorded walk is checkable the same way, and by the person who receives one:
 
@@ -445,8 +581,9 @@ a disabled sensor does not appear in most BMC web UIs at all.
 **Not every `Exposes` entry is a sensor**, and treating them alike is how a tool
 reports a healthy board as broken. PID control loops, stepwise fan curves, EEPROMs,
 firmware images, I2C muxes and GPIO presence detectors are declared exactly like
-sensors and can never appear in a Redfish `Sensors` collection — **2,069 of 8,809
-upstream declarations, about 23 %**, measured at the pinned revision. They are
+sensors and can never appear in a Redfish `Sensors` collection — **2,069 of the
+9,424 upstream declarations at the pinned revision, about 22 %**, as `census` counts
+them. They are
 classified out of the expectation and counted, never silently dropped.
 
 The classification is **three-valued for the same reason presence is**: a `Type` this
@@ -465,9 +602,10 @@ watches readings**, and running the reader across the upstream corpus found two.
 ## What reading the real configs changed
 
 The parser is shaped by measuring the upstream configuration corpus rather than
-by reading the format documentation. Every number below was derived at
-`openbmc/entity-manager@0ada0483` — **349 files** — and is stated with that basis
-because a count without one cannot be re-derived, only believed.
+by reading the format documentation. Every number below is what
+[`census`](#counting-a-corpus) prints at `openbmc/entity-manager@0ada0483` —
+**349 files** — and is stated with that basis because a count without one cannot
+be re-derived, only believed.
 
 Five things the documented example does not prepare you for, each of which
 silently corrupts a naive implementation:
@@ -479,7 +617,8 @@ silently corrupts a naive implementation:
   remaining ten being the JSONC files above, whose top level a strict parser
   never sees at all.
 - **One `Exposes` entry can declare several sensors.** Hot-swap controllers carry
-  a `Label` per rail; 1,132 entries use them and one declares 33. Counting
+  a `Label` per rail; 1,233 entries declare 5,617 rails in a `Labels` array, and
+  one declares 33. Counting
   entries counts boards, not sensors. **The rail set comes from the entry's
   `Labels` array, which declares it** — not from its thresholds, which are only a
   proxy for it. Across the vendored files `Labels` declares 149 rails and 34 carry
@@ -487,8 +626,8 @@ silently corrupts a naive implementation:
   expected them and their absence could never be reported. A rail naming itself
   through `<label>_Name` takes that name, because that is the name the machine
   publishes.
-- **709 of 8,809 declared sensor names are runtime templates** — about one in
-  twelve (`$bus`, `$address`, `$index`). Compared literally, every one of them
+- **820 of 9,424 declared sensor names are runtime templates** — about one in
+  eleven (`$bus`, `$address`, `$index`). Compared literally, every one of them
   reads as missing on a healthy board. `CONFIG_FORMAT.md` documents three such
   variables; the corpus uses five.
 - **The threshold-name vocabulary has fifteen spellings, not four.** `Direction`
@@ -496,6 +635,44 @@ silently corrupts a naive implementation:
   what decides which side a threshold guards. A name whose severity level is
   unrecognised is reported rather than discarded: a closed enum with a missing
   member misclassifies confidently instead of failing.
+
+## Counting a corpus
+
+Every count this README gives for the upstream corpus is one `census` prints, and
+anyone can print it again:
+
+```
+git clone https://github.com/openbmc/entity-manager
+bmc-sensor-audit census entity-manager/configurations
+```
+
+It reads exactly as `declare` and `coverage` read -- the same parse, the same
+classification of a `Type`, the same rule for a threshold whose name contradicts its
+`Direction` -- and counts the files and how they are written, the declarations by
+kind and by `Type`, the runtime templates and the variables they use, the `Labels`
+rails and those no threshold names, and the thresholds by `Direction` and by the
+spelling of their name, listing each contradiction by file. `--json` prints the same
+as `bmc-sensor-audit/census/1`, every type included.
+
+**A count is half a claim; the revision is the other half.** Between
+`0ada0483` and `495e0a4a`, nine weeks apart, the corpus went from 349 files to 362
+and from 9,424 declarations to 10,971, while every shape above held and both upstream
+defects stayed where they were. So `census` prints the commit the directory is checked
+out at, dated by its commit date rather than its author date -- a change can be
+written weeks before it is committed into the tree -- and the number of paths under
+the directory that differ from that commit. For a directory outside a checkout, or
+one its checkout does not track, it names no revision and says so. It also names the
+version that counted, because what counts as one declaration has changed between
+releases of this tool: a reader that splits `Labels` rails and further channels into
+sensors of their own counts more of them in the same files.
+
+It exits `2` when there is nothing to count -- no configuration file, or files that
+declare no sensor -- and when a file could not be read, since the counts are then of
+part of the corpus. Otherwise it exits `0`: a census counts, and finds nothing wrong.
+
+Thirteen of the upstream files are vendored verbatim under `tests/fixtures/upstream/`,
+pinned to `0ada048303bb007c9d7ec3a6a90433169f05dd99`, so every parser finding above
+runs from a clone; `tests/fixtures/upstream/README.md` says what each file is for.
 
 ## The firmware regression gate
 
@@ -707,12 +884,24 @@ identical thresholds. So they come from an operator-declared file passed with
 multi-channel parts as *candidates* and asserts nothing about them.
 
 Two example files ship in [`examples/supplemental/`](examples/supplemental). One is
-**worked** — every entry in `ampere-mtjade.json` is established by the vendored
-configuration plus the PMBus commands its labels name, and it declares no
-redundant group and no counter, because neither can be established from a
-configuration file. The other is a **template**, and its placeholder names match
-nothing on purpose: a run against it unedited stops and names every line still to
-be filled in, rather than checking nothing and reporting agreement.
+**worked** — every entry in `ampere-mtjade.json` is established by a vendored vendor
+file, and it declares no redundant group and no counter, because neither can be
+established from a configuration file. Its two flows come from the platform's
+`entity-manager` configuration plus the PMBus commands its labels name. Its one
+**coupling** — `TS4_Temp` drives `FAN3_1` — comes from the platform's own
+**phosphor-fan-control** configuration, vendored and pinned under
+[`tests/fixtures/fan-control/ampere-mtjade/`](tests/fixtures/fan-control/ampere-mtjade):
+the firmware maps that ambient temperature to the zone's fan target. That is a
+control law, not airflow physics, and the gain is withheld because the map is in
+PWM counts and the reading is RPM. Its one **fault channel** runs the other way,
+on the same zone assignment: a stopped `FAN3_1` is one way `TS4_Temp` can move.
+It states no strength — the vendor files that reading as the zone's ambient one,
+and how far a fan moves it is physics no file here states — so the engine names
+the fan as a cause and ranks nothing, which is the true answer. A test reads
+every clause of both bases back out of the vendored files. The other is a
+**template**, and its placeholder names match nothing on purpose: a run against
+it unedited stops and names every line still to be filled in, rather than
+checking nothing and reporting agreement.
 
 **A number the file leaves out is one the engine chooses.** A redundant group with
 no `tolerance` and a flow with no `loss_margin` are still judged — against the
@@ -721,9 +910,170 @@ operator picked. `detect` now names them. That is the same argument the required
 `basis` makes, one level down: a check running against an unspecified threshold is
 a working check, not a specified one.
 
-**Burn-in.** How many walks a liveness run needs, why the station's interval is
-not in that arithmetic, and the window that silently caps it:
+**Burn-in.** How many walks a liveness run needs, how the station's interval
+enters that arithmetic, and the window that silently caps it:
 [`docs/burn-in.md`](docs/burn-in.md).
+
+### A coupling, and writing its gain down
+
+A supplemental file can declare that one reading **drives** another — a fan
+tachometer and the thermistor downstream of the air it moves. That is a
+structural claim somebody who knows the installation can make. *By how much* is
+a coefficient, and almost nobody has one, so `gain: estimate` withholds it: the
+engine fits the number from history, reports it with its sample count, its
+r-squared and an interval, and **projects nothing until a person writes a number
+down**.
+
+`adopt` is how the number gets written down.
+
+```
+bmc-sensor-audit adopt --config <entity-manager-configs> \
+                 --walk walk0.json --walk walk1.json ... \
+                 --supplemental supplemental.json --list
+bmc-sensor-audit adopt ... --proposal 'FAN_A_TACH -> OUTLET_TEMP' \
+                 --surprises surprises.yaml
+```
+
+It re-runs the same fit from the same inputs — adopting is the one act here that
+changes what a later audit asserts, and it should not be possible against a
+printout of a file that has since been edited — then writes `gain` and a
+`gain_basis` sentence carrying the support the decision rested on.
+
+**Walks can be placed by the time they were taken.** Pass `--by-capture-time` to
+`adopt`, or to `detect` with `--walk`, and each walk takes the collection slot its
+capture time falls in, as `capture` and `--keep-walks` record it. A walk nobody
+took leaves its slot empty, and the run is judged as of the newest walk. A
+missed reading is then an empty slot, not a shift: on `adopt`'s own test
+fixture, a miss at walk 191 of 200 fits the true 0.004 on 197 pairs, and twenty
+missing walks fit it on 177. `adopt --list` prints how many walks filled how
+many slots, and the largest distance a time moved to reach its slot. Walks with
+no time, or two walks in one slot, are refused with exit 2.
+
+**It is asked for, because a time is not a cadence.** The model's windows count
+declared intervals, so the declared cadence has to be the one the walks were
+taken at. Measured on twelve walks of a frozen fan at a declared 60 s: placed by
+time, walks taken 2 s apart are refused, and walks taken an hour apart pass with
+the fan frozen; placed in order, the fan is found both times. When more slots
+come out empty than filled, the run says so.
+
+Without the flag, walks are placed one slot apart in the order given, as before
+0.3.10. There a missed reading costs history. A coupled sensor is fed from the
+walk after its last miss, and `adopt --list` prints how many readings that left;
+a late miss leaves nothing to fit. [`presence-audit`'s README](https://github.com/james-sheen/presence-audit#where-a-reading-lands-in-time)
+has the numbers for both.
+
+**It writes the spread beside it.** The engine proposes a `gain_sigma` with every
+fitted gain, the standard error of the fit, and `adopt` writes it with a
+`gain_sigma_basis` of its own saying what that number assumes and whether the
+engine found the assumption held. Without it the band a coupling's projection is
+graded against treats the gain as exact. The spread needs supplemental format 3,
+so `adopt` raises a file declaring format 2 and says it did: an older build then
+refuses the file by name instead of dropping the spread. A proposal with no
+usable standard error writes the gain alone, and says so.
+
+**It refuses more often than it writes**, and each refusal is a different fact:
+
+| Refusal | Why | Override |
+|---|---|---|
+| the coupling already declares a number | that is your claim about the machine; a fit that disagrees is a **finding**, which `detect` reports | none — this one does not move |
+| the replay found the proposal caught no more | `r_squared` says how well it fits the window it was fitted on, which is a different question | `--force`, stamping `adopted_without_replay_gain` |
+| there is no corpus to replay against | a proposal nobody could test is not a proposal that failed | `--force`, stamping `adopted_untested` |
+
+**The engine will not do this and that has not changed.** It proposes and never
+promotes, on the grounds that a tool which replaces a declaration with its own
+measurement leaves nobody able to say what the model asserts. What makes this
+different is the distance: a separate distribution, a separate command, a
+proposal named by a person, and a basis in the file. Take any one of those away
+and it is the thing the engine refuses.
+
+### Filing forecasts, and grading them as they mature
+
+`--ledger PATH` files the engine's own forecasts into a SQLite ledger, so a later
+cycle can grade them against what the board then read. **Only what the model
+declares is forecast**: a coupling's driver carries a projector, and the engine
+files a random walk beside each of its forecasts as the yardstick. A sensor
+nobody declared a coupling for is not forecast at all, because that would grade
+a model nobody chose.
+
+```
+bmc-sensor-audit detect --config <entity-manager-configs> --target https://<bmc> \
+                 --supplemental supplemental.json \
+                 --resident --ledger ledger.sqlite
+```
+
+`--resident` walks the same target again and again in one process — every
+`--every` seconds, the supplemental file's declared cadence by default — and each
+cycle grades whatever has matured before filing the next forecast
+`--horizon` seconds ahead. Each cycle prints one line: what the ledger holds and
+how much of it is graded, the confirm rate beside the rate the bands promised, and
+the forecast's CRPS beside the random walk's, each with its count. **Before
+anything matures it says `none yet`**, because a zero would read as a measurement.
+`--cycles N` stops it; otherwise it runs until interrupted.
+
+**Separate runs need the readings too.** A forecast is graded against the reading
+nearest the moment it matures, and one walk holds one reading, stamped when it was
+taken. So a ledger shared between runs started by `cron` grades nothing unless the
+readings persist as well. `--history PATH` keeps them, and a run without it says
+so. It needs `arbiter-engine` 0.2.9 or later: before that, the engine's durable
+store could not be described, and the ledger graded nothing read through it.
+
+**A coupling is graded once its gain is written down.** Each cycle also rolls the
+model forward from the driver's own forecast, so the coupling carries the
+forecast move downstream and files what it predicts for the reading it drives,
+with a random walk beside it; the cycle line adds `coupling projections crps`
+with its count. The band it is graded against is the driver's forecast doubt
+passed through the gain. With `gain: estimate` it files nothing and the run says
+`gain_not_adopted`. Until 0.3.5 the roll-forward started from the current
+readings, which moves nothing when no action is scheduled, so a coupling was
+never graded, adopted or not; the engine named a missing spread as the reason,
+and a spread filed nothing either. And **no real board has produced one of these
+figures**: every number here so far came from a bench whose readings were
+generated.
+
+### Cases, and what settled one
+
+**Beside every ranking `detect` prints the reading to take first**, as `read
+first:` -- the one reading the engine's ranking rests on most. On the Mt. Jade
+file there is one declared cause, so it is the fan's own reading; where
+strengths are declared the engine weighs them, and where they are not it
+chooses by the shape of the declared graph.
+
+`--case-severity` and `--case-checks` keep a case per finding in the `--ledger`
+file. Each finding opens one on its sensor unless one is open, the ranking is
+attached, and every later walk is checked into it until that many clean checks
+in a row, with nothing at or above that severity, close it. **The number is
+yours**: the board file cannot carry it, and this package chooses none.
+Recorded walks need `--by-capture-time`, because a case counts walks by the time
+each was taken, and a run the ledger has already judged is refused rather than
+counted twice.
+
+```
+bmc-sensor-audit detect --config <entity-manager-configs> --target https://<bmc> --supplemental supplemental.json --resident --ledger ledger.sqlite --case-severity warning --case-checks 2
+bmc-sensor-audit cases --ledger ledger.sqlite
+bmc-sensor-audit confirm --ledger ledger.sqlite <case-id> --cause FAN3_1 --reading FAN3_1.reading --basis bench-check
+```
+
+`confirm` records the sensor a person found to be the cause and the reading that
+settled it, and `cases` prints the book, each confirmation read back against the
+ranking its case held before it: where the cause stood, and whether the reading
+that settled it was the one the ranking named. A confirmation is not a surprise
+entry -- every case begins with a finding, so a corpus written from them would
+hold nothing but detections.
+
+**It does not plan, and that is its scope rather than a gap.** The engine's `plan`
+ranks declared actions against a declared goal, and a sensor audit holds no lever.
+The board file can declare an action but gives it no values to try, has no key for
+a goal, and its one coupling runs from inlet temperature to the fan -- from a
+reading nobody sets to the actuator -- so no action could reach anything through
+it. On a board `plan` declines by name -- `no_objective`, or `no_candidates` for an
+action with no values to try -- and the loop test reads that as the answer it is.
+
+**`--keep-walks DIR` keeps what a resident run walked**, one file per cycle named
+by its instant. `adopt` fits from walks, and a resident run otherwise kept its
+readings only in `--history`, so a day of grading a board left nothing to adopt a
+gain from. The kept walks are also the one record anyone else can re-derive the
+run's figures from. `docs/burn-in.md` sets out a board run end to end, with what
+to record and when each figure can first exist.
 
 **A per-run record.** `--attest-out` writes what was checked, what was **declined**,
 and the measurement behind every finding — the reading, the threshold it crossed and
@@ -768,7 +1118,9 @@ Both are hot-swap controller temperature thresholds named `upper critical` and
 given `Direction: less than`, in `meta/fbyv2.json` and `meta/fbyv35.json`. The
 named condition cannot alarm, and the healthy range does. This is the same
 polarity inversion the tool is built to catch downstream, sitting in the
-declaration that every downstream generator trusts.
+declaration that every downstream generator trusts. `census` lists every such
+threshold at whatever revision a checkout holds; at `0ada0483` and at `495e0a4a`
+it lists these two and no other.
 
 ## Licence
 
@@ -877,18 +1229,7 @@ a diff is safe to publish.
   observation**: the rule that built them is the rule that grows them, and a set
   extended to match one machine is a set that agrees with that machine by
   construction.
-- **The corpus-wide totals are still not reproducible, though the findings now
-  are.** Thirteen upstream configurations are vendored verbatim under
-  `tests/fixtures/upstream/`, with Intel's copyright and the upstream licence
-  carried alongside, and every documented parser finding is now runnable from a
-  clone, **pinned to `0ada048303bb007c9d7ec3a6a90433169f05dd99`**. What they
-  cannot reproduce are the corpus-wide counts — 349 files, 8,809 sensors, 709
-  templated names, 15,860 thresholds — which need the full corpus. The first
-  attempt at this directory was unpinned, and within a day two of its nine files
-  had been renamed upstream and every count had moved; the shapes did not.
-  `tests/fixtures/upstream/README.md` records what each file is for, what the set
-  does not cover, and one open lead it found.
-- **Two recordings are real; the rest are synthetic.**
+- **Three recordings are real; the rest are synthetic.**
   `tests/fixtures/walk_qemu_bletchley.json` was captured from upstream `bmcweb`
   under QEMU and proves the modern `Sensors` shape against firmware this project
   did not write. `tests/fixtures/stuck_at_qemu_bletchley.json` is 28 consecutive
@@ -899,9 +1240,11 @@ a diff is safe to publish.
   still is derivable from the recording itself, and over the driven phase the
   engine's verdict equals that derived set exactly. Freezing a register through an
   emulator monitor is an experiment, not a sensor failure, and the fixture says so.
-  The two `walk_*_tree.json` fixtures remain generated by this
-  project's own mock, and the deprecated `Thermal`/`Power` shape is still proven
-  only by them. The capture also has a floor of its own: QEMU wires a subset of
-  the board's devices, so the population is partial by construction, and a
+  The third, `tests/fixtures/redfish_witherspoon_2_9_0.json`, proves the
+  deprecated `Thermal` shape against the 2.9.0 witherspoon image (above). The two
+  `walk_*_tree.json` fixtures remain generated by this project's own mock, and the
+  deprecated `Power` shape is still proven only by them. The bletchley capture
+  also has a floor of its own: QEMU wires a subset of the board's devices, so the
+  population is partial by construction, and a
   synthetic FRU had to be written into the emulated EEPROM before entity-manager
   would instantiate the board at all.

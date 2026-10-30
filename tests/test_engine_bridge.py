@@ -106,6 +106,26 @@ def _require_the_pinned_engine() -> None:
             f"BSA_VERIFY_ENGINE_PRERELEASE, and its release part {comparable} is "
             f"still outside >={floor},<{ceiling}. Naming a pre-release opts into "
             f"verifying it, not into ignoring the pin", pytrace=False)
+    if outside and named and named != installed:
+        pytest.fail(
+            f"BSA_VERIFY_ENGINE_PRERELEASE names {named}, and arbiter-engine "
+            f"{installed} is installed. It admits the one version it names, so "
+            f"it shuts again by itself when the engine moves; set it to "
+            f"{installed} to verify this one", pytrace=False)
+    if outside and not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", installed):
+        # THE DOOR, NAMED WHERE IT IS NEEDED. The opt-in above existed for three
+        # weeks before anything said where it was, so a developer running this
+        # against engine master met 54 setup errors and a remedy that could only
+        # downgrade them away from the version they meant to test. One session
+        # faked a final version string instead. A pre-release is the one case
+        # the door exists for, so the refusal says which variable opens it and
+        # with what value -- and still does not open it by itself.
+        pytest.fail(
+            f"arbiter-engine {installed} is a pre-release, and this project pins "
+            f">={floor},<{ceiling} in plain X.Y.Z. To verify THIS engine against "
+            f"this suite, name it: BSA_VERIFY_ENGINE_PRERELEASE={installed}. "
+            f"Otherwise it is an environment error, not a code failure: "
+            f"pip install --upgrade 'bmc-sensor-audit[detect]'", pytrace=False)
     if outside:
         pytest.fail(
             f"arbiter-engine {installed} is installed but this project pins "
@@ -297,7 +317,7 @@ class TestTheGeneratedModelIsAcceptedWhole:
         """
         from presence_audit.generator import READING
         _, manifest, session = generated
-        sensor = next(s for s in manifest.sensors if s.lower[1] is not None)
+        sensor = next(s for s in manifest.points if s.lower[1] is not None)
         below = sensor.lower[1] - 0.1
         session.add_entity(sensor.entity_type, sensor.entity_type,
                            properties={READING: below})
@@ -354,7 +374,7 @@ class TestTheWholeStage2PathEndToEnd:
         return manifest, result, outcome
 
     def _pick(self, manifest):
-        return next(s for s in manifest.sensors if s.has_lower and s.upper[0] is not None)
+        return next(s for s in manifest.points if s.has_lower and s.upper[0] is not None)
 
     def test_a_healthy_reading_passes_and_says_liveness_is_warming_up(self):
         """One walk is one sample. The gate passes, and the report can say so rather
@@ -1213,7 +1233,7 @@ class TestTheWholeCorpusFinishesInATimeAGateCanLiveWith:
         started = time.perf_counter()
         session = EngineSession()
         session.load_model(str(path))
-        for sensor in manifest.sensors:
+        for sensor in manifest.points:
             session.add_entity(sensor.entity_type, sensor.entity_type,
                                properties={"reading": 25.0})
             session.add_observations(sensor.entity_type, "reading",
@@ -1235,11 +1255,11 @@ class TestTheWholeCorpusFinishesInATimeAGateCanLiveWith:
         engine is asked to do by more than a factor of two, and `check()` cost is
         driven by what was fed."""
         _, declaration, manifest, envelope = run_over_the_corpus
-        assert envelope["checked"]["entities"] == len(manifest.sensors)
-        assert len(manifest.sensors) < len(declaration.sensors), (
+        assert envelope["checked"]["entities"] == len(manifest.points)
+        assert len(manifest.points) < len(declaration.sensors), (
             "every declaration is now modelled; the exclusion ledger has stopped "
             "excluding, which is a bigger change than a timing one")
-        assert envelope["checked"]["invariants"] == 2 * len(manifest.sensors), (
+        assert envelope["checked"]["invariants"] == 2 * len(manifest.points), (
             "two axioms per modelled sensor is the shape the measurement assumed")
 
     def test_nothing_was_dropped_between_the_declaration_and_the_ledger(
@@ -1248,7 +1268,60 @@ class TestTheWholeCorpusFinishesInATimeAGateCanLiveWith:
         honest if the difference is accounted for rather than lost."""
         _, declaration, manifest, _ = run_over_the_corpus
         excluded = sum(len(names) for names in manifest.excluded.values())
-        assert len(manifest.sensors) + excluded == len(declaration.sensors), (
-            f"{len(declaration.sensors)} declared, {len(manifest.sensors)} modelled, "
+        assert len(manifest.points) + excluded == len(declaration.sensors), (
+            f"{len(declaration.sensors)} declared, {len(manifest.points)} modelled, "
             f"{excluded} excluded -- these do not add up, so something was dropped "
             f"without a reason being recorded")
+
+
+class TestThePreReleaseDoorIsNamedWhereItIsNeeded:
+    """The guard's refusals, each asked of the guard itself with the installed
+    version substituted. The door existed for three weeks before any message or
+    document said where it was, and 54 setup errors pointed only at a downgrade.
+    """
+
+    @staticmethod
+    def _refusal(monkeypatch, installed, named=None):
+        monkeypatch.setattr(importlib.metadata, "version", lambda _name: installed)
+        if named is None:
+            monkeypatch.delenv("BSA_VERIFY_ENGINE_PRERELEASE", raising=False)
+        else:
+            monkeypatch.setenv("BSA_VERIFY_ENGINE_PRERELEASE", named)
+        try:
+            _require_the_pinned_engine()
+        except pytest.fail.Exception as refusal:
+            return str(refusal)
+        return None
+
+    def test_a_pre_release_is_told_the_variable_and_the_value(self, monkeypatch):
+        message = self._refusal(monkeypatch, "0.2.9.dev0")
+        assert message is not None, "a pre-release was admitted without being named"
+        assert "BSA_VERIFY_ENGINE_PRERELEASE=0.2.9.dev0" in message, message
+
+    @staticmethod
+    def _inside_the_pin() -> str:
+        """A pre-release whose release part is the pin's own floor. This was a
+        literal once, which is a copy of the pin, and it fell outside the range
+        the day the floor rose past it."""
+        pyproject = pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml"
+        floor = re.search(r'"arbiter-engine>=([0-9.]+),<', pyproject.read_text()).group(1)
+        return f"{floor}.dev0"
+
+    def test_naming_it_opens_the_door(self, monkeypatch):
+        inside = self._inside_the_pin()
+        assert self._refusal(monkeypatch, inside, named=inside) is None
+
+    def test_a_stale_name_says_it_is_stale(self, monkeypatch):
+        """The opt-in expires by itself; the refusal says that is what happened
+        rather than reading as an ordinary out-of-range install."""
+        message = self._refusal(monkeypatch, "0.2.9.dev0", named="0.2.8.dev0")
+        assert message is not None
+        assert "names 0.2.8.dev0" in message and "0.2.9.dev0 is installed" in message
+
+    def test_a_final_version_outside_the_pin_is_not_offered_the_door(self, monkeypatch):
+        """The door is for a pre-release. Offering it to a plain release below
+        the floor would teach the variable as a way round the pin."""
+        message = self._refusal(monkeypatch, "0.1.0")
+        assert message is not None
+        assert "BSA_VERIFY_ENGINE_PRERELEASE" not in message
+        assert "pip install --upgrade" in message

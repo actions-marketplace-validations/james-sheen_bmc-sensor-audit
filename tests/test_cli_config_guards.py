@@ -87,6 +87,90 @@ def _config_commands() -> list[str]:
 
 CONFIG_COMMANDS = _config_commands()
 
+
+def _ledger_commands() -> list[str]:
+    """Every subcommand that REQUIRES `--ledger` and takes no `--config`, read
+    out of the parser too: `cases` and `confirm` read what `detect --ledger`
+    kept, and are tested with the cases, not by the config rows here."""
+    from bmc_sensor_audit.cli import build_parser
+
+    found = []
+    for action in build_parser()._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for name, sub in action.choices.items():
+            options = {option: getattr(entry, "required", False)
+                       for entry in sub._actions
+                       for option in (entry.option_strings or [])}
+            if options.get("--ledger") and "--config" not in options:
+                found.append(name)
+    return sorted(found)
+
+
+LEDGER_COMMANDS = _ledger_commands()
+
+
+def _engine_backed_commands() -> set:
+    """Which subcommands cannot run without the optional extra.
+
+    DERIVED, not written down, for the same reason the command list above is.
+    The carve-out below used to name `detect`; `adopt` arrived needing the
+    engine too, and the written name did not grow with it -- so the near-miss
+    row went red on every interpreter in CI, on a release commit, for a
+    dependency that is optional by design. A list somebody types is a list that
+    stops being true on a day nobody is watching.
+
+    Read off the PARSE TREE of the CLI: `set_defaults(func=_cmd_X)` binds a
+    subcommand to its handler, and a handler that imports `arbiter_engine`
+    cannot run without it. Reading the source as TEXT would match the name in
+    any comment explaining the rule -- including this one, three lines up.
+    """
+    import ast
+
+    source = (SRC / "bmc_sensor_audit" / "cli.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    needs = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.ImportFrom) and inner.module:
+                root = inner.module.split(".")[0]
+            elif isinstance(inner, ast.Import):
+                root = inner.names[0].name.split(".")[0]
+            else:
+                continue
+            if root == "arbiter_engine":
+                needs.add(node.name)
+                break
+
+    handlers = {}
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        if getattr(call.func, "attr", None) != "set_defaults":
+            continue
+        target = getattr(call.func, "value", None)
+        name = getattr(target, "id", None)
+        for keyword in call.keywords:
+            if keyword.arg == "func" and isinstance(keyword.value, ast.Name):
+                handlers[name] = keyword.value.id
+
+    # The parser variable is named after the subcommand in every case so far,
+    # and where it is not this falls back to the handler's own suffix rather
+    # than guessing: `_cmd_adopt` -> `adopt`.
+    out = set()
+    for variable, handler in handlers.items():
+        if handler not in needs:
+            continue
+        command = handler[len("_cmd_"):] if handler.startswith("_cmd_") else variable
+        out.add(command)
+    return out
+
+
+ENGINE_BACKED = _engine_backed_commands()
+
 # What each command needs BEYOND `--config` in order to run at all. The set above is
 # derived; this table is written, so it is pinned against the derived set below. A new
 # `--config` command then fails loudly here instead of quietly not being tested.
@@ -94,6 +178,14 @@ EXTRA_ARGS = {
     "declare": [],
     "coverage": ["--walk", str(WALK)],
     "detect": ["--walk", str(WALK)],
+    # `--list` rather than `--proposal`: the guards here are about what the
+    # command does with its CONFIG, and naming a proposal would make every row
+    # below depend on whether one was fitted. The supplemental declares nothing
+    # at all, because one naming a point the configuration does not carry is
+    # refused by the cross-check and no single fixture satisfies every board.
+    "adopt": ["--walk", str(WALK), "--supplemental",
+              str(ROOT / "tests" / "fixtures" / "supplemental_empty.json"),
+              "--list"],
 }
 
 
@@ -147,6 +239,34 @@ class TestTheCommandSetIsDerived:
         assert sorted(EXTRA_ARGS) == CONFIG_COMMANDS, (
             "the parser and this table disagree about which commands take --config; "
             f"parser says {CONFIG_COMMANDS}, table says {sorted(EXTRA_ARGS)}")
+
+    def test_the_engine_backed_set_is_derived_and_not_empty(self):
+        """Non-vacuity. An empty set means the carve-out below never fires and
+        every engine-backed command goes red wherever the extra is absent --
+        which is exactly what a stale written list did."""
+        assert ENGINE_BACKED, (
+            "no command was found to need the engine; the derivation is broken, "
+            "not the CLI")
+        # A command reading a ledger takes no --config, so the rows below never
+        # reach it by design; it is tested with the cases it reads. Anything
+        # else outside the config commands is a command these rows miss.
+        assert ENGINE_BACKED <= set(CONFIG_COMMANDS) | set(LEDGER_COMMANDS), (
+            f"{sorted(ENGINE_BACKED - set(CONFIG_COMMANDS) - set(LEDGER_COMMANDS))} "
+            f"need the engine and do not take --config, so the rows below never "
+            f"reach them")
+        assert ENGINE_BACKED & set(CONFIG_COMMANDS), (
+            "no config command needs the engine, so the carve-out below never fires")
+
+    def test_the_ledger_commands_are_the_two_that_read_cases(self):
+        """Non-vacuity for the carve-out above: derived, and exactly these."""
+        assert LEDGER_COMMANDS == ["cases", "confirm"], LEDGER_COMMANDS
+
+    def test_a_command_that_does_not_need_the_engine_is_not_in_it(self):
+        """The other half of non-vacuity: a set containing everything would
+        also never go red, and would silence every row in this file."""
+        assert "declare" not in ENGINE_BACKED, (
+            "declare is Stage 1 and imports no engine; a derivation that says "
+            "otherwise is matching something else")
 
     def test_more_than_one_command_is_covered(self):
         """Guards against the derivation silently returning nothing -- an empty
@@ -266,9 +386,10 @@ class TestTheNearMisses:
 
     @pytest.mark.parametrize("command", CONFIG_COMMANDS)
     def test_a_real_configuration_is_clean(self, command, tmp_path):
-        if command == "detect" and not ENGINE_INSTALLED:
-            pytest.skip("detect exits 2 without the optional extra, unrelated to any "
-                        "guard here; the canary workflow installs it and runs this")
+        if command in ENGINE_BACKED and not ENGINE_INSTALLED:
+            pytest.skip(f"{command} exits 2 without the optional extra, unrelated "
+                        f"to any guard here; the canary workflow installs it and "
+                        f"runs this")
         _write(tmp_path, "board.json", REAL_CONFIG)
         result = _run(command, tmp_path)
         assert result.returncode == 0, f"{command}: {result.stdout}\n{result.stderr}"

@@ -60,7 +60,68 @@ keywords = ["openbmc", "redfish", "bmc", "entity-manager", "sensors",
 #
 # Measured against `presence-audit==0.1.9` installed from the index: 812 passed,
 # 8 skipped, the same pair 0.1.8 reports.
-dependencies = ["presence-audit>=0.1.9,<0.2"]
+#
+# THE FLOOR MOVED TO 0.1.10 BECAUSE A DECLARED COUPLING DID NOT REACH THE ENGINE.
+# Two defects, both in the core and both invisible from either side of the seam:
+# nothing added the coupling's RELATIONSHIP, so a declared coupling produced
+# `couplings_seen: 0` and a run with one was byte-identical to a run without;
+# and the feeder stamped every observation sixty seconds apart whatever
+# `sampling_interval_s` said, so a delay validated against the collector's grid
+# was applied on a different one. Measured on a driven series generated from its
+# driver at exactly one interval with the file declaring 300 s: -0.0023 against a
+# truth of +0.0040, wrong sign, r_squared 0.33, interval excluding the truth.
+#
+# `adopt` writes a fitted gain into `--supplemental`, so that number is the one
+# it would have written, with a sentence beside it saying it was measured. This
+# is not a floor raised for a convenience: below it the command is wrong rather
+# than absent. MEASURED both ways -- `tests/test_adopt_writes_a_fitted_gain_down.py`
+# and `tests/test_burn_in_cadence.py` are 10 failed / 8 passed / 9 errors on
+# 0.1.9 and 27 passed on 0.1.10.
+#
+# THE FLOOR MOVED TO 0.1.11 BECAUSE `adopt` WRITES A SPREAD. The engine proposes
+# a `gain_sigma` with every fitted gain and `adopt` writes it beside the gain,
+# which needs supplemental format 3 -- the first that carries a spread, cut in
+# presence-audit 0.1.11. Below it `adopt` refuses by name rather than writing a
+# gain whose spread no reader can load. MEASURED both ways:
+# `tests/test_adopt_writes_the_spread_beside_the_gain.py` is 5 failed / 6 passed
+# / 11 errors on 0.1.10 and 22 passed on the tree that becomes 0.1.11.
+#
+# THE FLOOR MOVED TO 0.1.13 BECAUSE THE WRITER MOVED THERE, AND THE CEILING TO 0.3.
+# `presence-audit` 0.1.13 names its subject `point` and took `adopt`'s writer over
+# as `presence_audit.adopt`, which this package now calls -- so below it the
+# command has nothing to call. Its 0.2.0 removes the old names, which this package
+# no longer writes: the suite was run against a 0.2.0 build as well as 0.1.13
+# before the ceiling admitted it.
+#
+# THE FLOOR MOVED TO 0.2.3 BECAUSE ONE MISSED READING REVERSED A FITTED GAIN.
+# The core fed each sensor's history as a gapless ladder, so a sensor that
+# missed one reading had every earlier reading placed one walk late against its
+# coupled partner. On the adopt fixture, 200 walks and a true gain of 0.004, a
+# driver missing walk 191 fitted -0.0021, which `--force` would have written.
+# 0.2.3 feeds a coupled sensor from its last miss on and reports the cut, and
+# `adopt --list` prints it. MEASURED both ways:
+# `tests/test_a_missed_reading_does_not_move_the_fit.py` is 5 failed on 0.2.2
+# with this package's previous code, on the numbers themselves, and 5 passed on 0.2.3.
+#
+# THEN TO 0.2.4, BECAUSE THE CUT COST THE FIT ITS HISTORY. A late miss left too
+# few pairs and nothing was fitted. 0.2.4 can place each recorded walk in the grid
+# slot its capture time falls in, keeping every other pair, and `detect` and
+# `adopt` do so, judged as of the newest walk, when `--by-capture-time` asks.
+# Without it every walk keeps the 0.2.3 path. MEASURED both ways:
+# `tests/test_recorded_walks_are_placed_by_their_own_time.py` is 13 failed with
+# this code on 0.2.3, which cannot place by capture time -- the one pass is the
+# refusal that returns before the core is reached -- and 14 passed on 0.2.4.
+# With 0.3.9's code on 0.2.4 it is 11 failed and 3 passed, and the three are
+# the cases without the flag: 0.3.9's behaviour is the default.
+#
+# THEN TO 0.2.6, BECAUSE A FAULT CHANNEL CAN SAY HOW LONG A FAILURE TAKES TO
+# SHOW. 0.2.6 reads `propagation_delay_s` on a fault channel and writes it where
+# the engine reads a dead time, and `detect --walk` then needs
+# `--by-capture-time`. MEASURED, with the engine held at the candidate:
+# `tests/test_a_delayed_fault_channel_is_read_at_its_delay.py` is 4 failed on
+# 0.2.5, which refuses the key by name, and 5 passed on the tree that becomes
+# 0.2.6; the other 985 pass on both.
+dependencies = ["presence-audit>=0.2.6,<0.3"]
 
 [project.optional-dependencies]
 # **The floor is DERIVED, not chosen.** Every published release inside the range was
@@ -79,7 +140,84 @@ dependencies = ["presence-audit>=0.1.9,<0.2"]
 # every release inside it, and nothing between 0.1.8 and 0.2.4 was run
 # against this suite on the day the ceiling moved. The old floor's reason is
 # above and still holds; it is no longer the boundary this package sits on.
-detect = ["arbiter-engine>=0.2.4,<0.3"]
+#
+# 0.2.7 IS THE FLOOR BECAUSE `adopt` ASKS THE ENGINE A QUESTION 0.2.6 CANNOT
+# ANSWER. The replay -- what adopting a proposal would have caught, against a
+# corpus of what actually happened -- arrives through `model_describe(session,
+# surprises)`, and on 0.2.6 that function takes one argument. It is the gate
+# this command turns on, so below the floor `adopt` cannot refuse a number that
+# would have changed nothing, which is the discipline it exists to apply.
+#
+# 0.2.9 IS THE FLOOR BECAUSE `--history` NEEDS A DURABLE STORE THE ENGINE CAN
+# DESCRIBE AND GRADE THROUGH. Measured on 0.2.8: a session over
+# `SqliteObservationHistory` raised in `model_describe`, and the ledger graded
+# NONE of its forecasts -- every one `ungradeable`, because it read the
+# in-memory store's private series and skipped any other. `detect --history`
+# refuses by name below the floor rather than failing three calls later, and
+# the suite's two history tests are what hold that 0.2.8 is below it.
+#
+# 0.2.13 IS THE FLOOR BECAUSE THE LOOP ASKS FOR THE CASE BOOK. `tests/test_the_loop_runs.py`
+# drives every stage the engine offers on this domain -- sense, model, a ranking of
+# declared causes, a plan, an executed action, a fitted gain and a case opened and
+# resolved -- and the case book and the per-stage report in `model_describe`
+# arrived in 0.2.13, as did the decline beside a cause the ranking cannot score
+# (`cpt_missing`), which `detect` prints. Below it the loop has a stage the
+# engine cannot answer.
+#
+# 0.2.15 IS THE FLOOR BECAUSE THE LOOP READS DECLINES THROUGH THE ENGINE'S WALKER.
+# `declined_reasons` and `unpublished_reasons` ship beside the vocabularies from
+# 0.2.15, and the loop's copy of that walk is gone. Measured on 0.2.14: the ten
+# loop tests fail on the import, the fifty-eight engine-bridge tests refuse at
+# setup because 0.2.14 is below this pin, as they are built to, and the other 941
+# pass. So this floor is the loop's; nothing `detect` calls moved in 0.2.15.
+#
+# 0.2.18 IS THE FLOOR FOR THE SAME KIND OF REASON. The loop reads what 0.2.18
+# adds: `gaps` locating a power balance the board file declares and a walk
+# breaks, the `gaps` and `confirm` case stages, and the rank a confirmed cause
+# held. Measured on 0.2.17: the six loop tests that read them fail (four) or
+# error at their fixture (two), the fifty-eight engine-bridge tests refuse at
+# setup because 0.2.17 is below this pin, as they are built to, and the other
+# 959 pass. The suite as it stood before this change passed unchanged on 0.2.18,
+# so this floor too is the loop's.
+#
+# 0.2.20 IS THE FLOOR BECAUSE `confirm` READS BACK THE READING THAT SETTLED A
+# CASE, and the case book reports it from 0.2.20: before it, the book said only
+# whether the named reading sat on the cause, and `confirm` would print "no
+# reading given" over a reading the operator gave. Measured on 0.2.19, paired on
+# the runner with the pin still below it: the one test that reads it fails and
+# the other 1035 pass. With the pin here, the fifty-eight engine-bridge tests
+# also refuse at setup on 0.2.19, as they are built to.
+#
+# 0.2.23 IS THE FLOOR BECAUSE `cases` AND `confirm` SAY WHAT A RANK RESTED ON.
+# The case book reports it from 0.2.23 -- a posterior, or hop order where no
+# strength is declared, as on this board -- and the loop test pins it. Measured
+# on 0.2.22, paired on the runner with the pin still below it: exactly the two
+# tests that read it fail, and the other 1045 pass.
+#
+# 0.2.27 IS THE FLOOR BECAUSE `detect` PRINTS WHERE THE WALK STOPPED. The engine
+# walks from 0.2.27 -- each cause's standing, the walk's state, the reading named
+# only while a cause is open, a rank ordered by standing -- and the loop pins the
+# fan as never the place the fault stops. Measured on 0.2.26 with the pin still
+# below it: exactly the six tests that read it fail, and the other 1054 pass.
+#
+# 0.2.30 IS THE FLOOR BECAUSE THE LOOP READS WHERE THE WALK ENDS. `gaps` says so
+# from 0.2.30, and on sixteen cycles of this board the loop pins the zone's finding
+# as unexplained -- the fan, its only declared cause, reads sound -- with no
+# undeclared channel to offer. Measured on 0.2.29 with the pin still below it:
+# exactly the one test that reads it fails, and the other 1051 pass.
+#
+# 0.2.31 IS THE FLOOR BECAUSE `confirm` SAYS WHERE THE CAUSE STOOD. From 0.2.31 a
+# case keeps the walk and the book reads a confirmation back against it, and this
+# package prints it: the fan confirmed after sixteen cycles, screened on an
+# unexplained walk. Measured on 0.2.30 with the pin still below it: exactly the four
+# tests that read it fail, and the other 1061 pass.
+#
+# 0.2.32 IS THE FLOOR BECAUSE `detect` PRINTS WHAT THE FAULT'S STOP EXPLAINS. From
+# 0.2.32 each frontier entry says what it explains below it and which actions
+# apply, and this package prints it under the walk line. Measured on 0.2.31 with
+# the pin still below it: exactly the two tests that read it fail, and the other
+# 1065 pass.
+detect = ["arbiter-engine>=0.2.32,<0.3"]
 dev = ["pytest>=7"]
 
 [project.scripts]

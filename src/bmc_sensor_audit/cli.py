@@ -3,6 +3,7 @@
     bmc-sensor-audit coverage   --config <path> --target https://<bmc> [--insecure]
     bmc-sensor-audit coverage   --config <path> --walk recorded-walk.json
     bmc-sensor-audit declare    --config <path>
+    bmc-sensor-audit census     <entity-manager checkout>/configurations
     bmc-sensor-audit regression --before before.json --after after.json
 
 `--config` accepts a file or a directory, and a directory is walked recursively,
@@ -22,7 +23,8 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,9 +39,10 @@ from .inventory.declaration_source import (DeclarationSourceError,
                                            load_declaration_source, merge_sources)
 from presence_audit import exit_contract as _exit_contract
 from presence_audit.diff import compare
+from .inventory.census import census_as_text, take_census
 from .inventory.entity_manager import load_declaration
 from .inventory.redfish import (CertificatePinError, RedfishClient, Walk,
-                                order_walks, validate_walk,
+                                WalkFileError, order_walks, validate_walk,
                                 etag_cache, membership_unchanged,
                                 walk_chassis, walk_digest, walk_from_dict)
 from presence_audit.regression import compare_walks, parse_prefix_map
@@ -55,14 +58,40 @@ EXIT_REGRESSION = _exit_contract.FINDINGS
 EXIT_INCOMPLETE = _exit_contract.INCOMPLETE
 
 
+def _now() -> datetime:
+    """The instant a resident cycle starts, and the one it stamps and files at.
+
+    A module attribute rather than a bare call, together with `_sleep`, so a
+    bench can drive a resident run through an hour of simulated collection in
+    a second -- the only way a test can watch a forecast mature.
+    """
+    return datetime.now(timezone.utc)
+
+
+_sleep = time.sleep
+
+
 def _load_recorded_walk(path: str) -> Walk:
     """Rehydrate a walk from a recorded fixture.
 
     Recording once and diffing repeatedly is how the firmware-upgrade gate works:
     capture before, capture after, compare both against the config. It is also
     how the test suite runs with no hardware in the room.
+
+    Every way the file can fail to be a walk is a `WalkFileError` naming the path:
+    a missing file, a file that is not JSON, and a walk the reader cannot read.
+    Each used to escape as a traceback, and a traceback exits `1`.
     """
-    return walk_from_dict(json.loads(Path(path).read_text()))
+    try:
+        payload = json.loads(Path(path).read_text())
+    except OSError as error:
+        raise WalkFileError(f"cannot read the walk {path}: {error}") from None
+    except json.JSONDecodeError as error:
+        raise WalkFileError(f"{path} is not parseable as JSON: {error}") from None
+    try:
+        return walk_from_dict(payload)
+    except WalkFileError as error:
+        raise WalkFileError(f"{path}: {error}") from None
 
 
 def _walk_span(walks: list[Walk]) -> str | None:
@@ -355,6 +384,43 @@ def _cmd_declare(args: argparse.Namespace) -> int:
     return EXIT_INCOMPLETE if declaration.unreadable else EXIT_CLEAN
 
 
+def _cmd_census(args: argparse.Namespace) -> int:
+    """Count a corpus, and refuse the same nothing `declare` refuses.
+
+    A census of a path that holds no configuration file, or whose files declare no
+    sensor, prints honest zeros -- which read exactly like a corpus that declares
+    nothing. So those exit 2, as `declare` does; and so does a census that could not
+    read every file, because its counts are then of part of the corpus.
+    """
+    root = Path(args.directory)
+    if not root.is_dir():
+        print(f"{args.directory} is not a directory. Name the directory the "
+              "configurations are in -- for an entity-manager checkout, its "
+              "`configurations/`", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    census = take_census(args.directory)
+    print(json.dumps(census, indent=1) if args.json
+          else census_as_text(census, top=args.top))
+
+    files, declared = census["files"], census["declarations"]["total"]
+    if not files["found"]:
+        print("no configuration file was found under the given directory -- "
+              "check the path", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    if not declared:
+        print(f"{files['found']} file(s) found, none of which declares a sensor. "
+              "Nothing here is a corpus to count -- check the path names a "
+              "configuration directory and not, say, a schema directory.",
+              file=sys.stderr)
+        return EXIT_INCOMPLETE
+    if files["unreadable"]:
+        print(f"{len(files['unreadable'])} file(s) could not be read, so these "
+              "counts are of part of the corpus and leave out whatever those "
+              "files declare.", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    return EXIT_CLEAN
+
+
 def _with_declaration_sources(declaration, paths):
     """Layer any `--declaration` files under the manufacturer's declaration.
 
@@ -503,9 +569,12 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
 
     report = compare(declaration, walk,
                      include_disabled_in_config=args.include_disabled)
+    # FORMAT 2, keyed on the core's `point` and on this package's own `sensor`,
+    # with every change kind spelled in this noun: the keys and kinds this report
+    # always carried, whichever core in the range is installed.
     rendered = (as_json(report, target=target,
-                        walk=walk if args.strict_fields else None) if args.json
-                else as_text(report, target=target))
+                        walk=walk if args.strict_fields else None, spelled=True)
+                if args.json else as_text(report, target=target))
     print(rendered)
 
     if args.strict_fields and not args.json:
@@ -536,6 +605,10 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     complete is not a board with missing sensors, and neither is an engine that is not
     installed.
     """
+    stores_refusal = _stores_refusal(args)
+    if stores_refusal:
+        print(stores_refusal, file=sys.stderr)
+        return EXIT_INCOMPLETE
     declaration = load_declaration(args.config)
     declaration, refusal = _with_declaration_sources(declaration, args.declaration)
     if refusal:
@@ -548,7 +621,11 @@ def _cmd_detect(args: argparse.Namespace) -> int:
 
     # `--walk` is repeatable and CHRONOLOGICAL, oldest first: stuck-at needs history,
     # and one walk is one sample. A live target gives exactly one.
-    if args.walk:
+    if args.resident:
+        # The resident loop walks for itself, every cycle; a first walk here
+        # would be one sample no cycle ever fed.
+        walks, target = [], args.target
+    elif args.walk:
         walks = [_load_recorded_walk(path) for path in args.walk]
         # The last walk supplies every current reading, so the order is not a
         # presentation detail. A shell glob hands over lexical order, in which
@@ -558,10 +635,11 @@ def _cmd_detect(args: argparse.Namespace) -> int:
             print(f"\n{ordering}", file=sys.stderr)
         span = _walk_span(walks)
         if span:
-            # The verdict is over the values; this is over the clock. The engine is
-            # told every sample is a minute old regardless of when the walk was
-            # taken, so `frozen` alone does not say whether the reading held still
-            # for a minute or for a shift. That distinction is only in the stamps.
+            # The verdict is over the values; this is over the clock. Unless
+            # --by-capture-time places them by their times, the engine is told the
+            # walks are one declared interval apart, whenever they were taken, so
+            # `frozen` alone does not say whether the reading held still for one
+            # interval or for a shift. That distinction is only in the stamps.
             print(f"\n{len(walks)} walks covering {span}")
         target = args.walk[-1]
     else:
@@ -571,14 +649,15 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     reports = [compare(declaration, walk,
                        include_disabled_in_config=args.include_disabled)
                for walk in walks]
-    current = reports[-1]
-    print(as_text(current, target=target))
+    current = reports[-1] if reports else None
+    if current is not None:
+        print(as_text(current, target=target))
 
-    if not current.walk_complete:
-        # An incomplete walk is not an empty machine, and it is not a model worth
-        # feeding either. Stop before the engine sees a partial picture.
-        print("\nwalk incomplete; liveness not evaluated", file=sys.stderr)
-        return EXIT_INCOMPLETE
+        if not current.walk_complete:
+            # An incomplete walk is not an empty machine, and it is not a model
+            # worth feeding either. Stop before the engine sees a partial picture.
+            print("\nwalk incomplete; liveness not evaluated", file=sys.stderr)
+            return EXIT_INCOMPLETE
 
     try:
         import yaml
@@ -589,8 +668,8 @@ def _cmd_detect(args: argparse.Namespace) -> int:
               "Stage 1 coverage above is complete and unaffected.", file=sys.stderr)
         return EXIT_INCOMPLETE
 
-    from presence_audit.feeder import evaluate, feed
-    from presence_audit.generator import generate
+    from presence_audit.feeder import PlacementError, evaluate, feed
+    from presence_audit.generator import DEFAULT_SAMPLE_INTERVAL_S, generate
     from presence_audit.supplemental import (SupplementalError, load_supplemental,
                                       unmatched_names)
     from presence_audit.report import detect_as_text, supplemental_as_text
@@ -615,6 +694,21 @@ def _cmd_detect(args: argparse.Namespace) -> int:
             for name in missing:
                 print(f"    {name}", file=sys.stderr)
             return EXIT_INCOMPLETE
+        # A DELAY ON A FAULT CHANNEL reads the cause that long before the finding.
+        # Recorded walks on the declared grid are placed on a ladder ending at the
+        # clock, so the delay would land on a reading taken at another time;
+        # placed by their own times it lands where it was declared. Refused, as
+        # cases are, rather than answered from the wrong reading.
+        delayed = [f"{c.source} -> {c.target}" for c in supplemental.fault_channels
+                   if (getattr(c, "propagation_delay_s", None) or 0) > 0]
+        if delayed and args.walk and not getattr(args, "by_capture_time", False):
+            print(f"\n{args.supplemental} declares a delay on {len(delayed)} fault "
+                  f"channel(s) ({', '.join(delayed)}): the engine reads a cause that "
+                  f"long before its finding, and recorded walks without "
+                  f"--by-capture-time are placed on a ladder ending at the clock, "
+                  f"so the cause would be read at a time nobody took it; add "
+                  f"--by-capture-time", file=sys.stderr)
+            return EXIT_INCOMPLETE
         # Printed whether or not anything is missing a number, so the reader sees
         # what was declared before they read a verdict that rests on it.
         print(supplemental_as_text(supplemental))
@@ -626,72 +720,144 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     model, manifest = generate(declaration, domain_id="bmc-sensor-audit",
                                expect_variation=not args.no_stuck_at,
                                supplemental=supplemental)
+    if _cases_asked(args):
+        # The operator's number, from the command line: the board file cannot
+        # carry it, and this package chooses none.
+        model["domain"]["cases"] = {"severity": args.case_severity,
+                                    "consecutive_checks": args.case_checks}
     if args.model_out:
         Path(args.model_out).write_text(yaml.safe_dump(model))
     if args.manifest_out:
-        Path(args.manifest_out).write_text(json.dumps(manifest.to_dict(), indent=2))
+        Path(args.manifest_out).write_text(_manifest_as_json(manifest))
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
         handle.write(yaml.safe_dump(model))
         model_path = handle.name
-    # A RESIDENT session when the operator asks for one. The engine has kept a
+    # DURABLE STORES when the operator asks for them. The engine has kept a
     # durable prediction ledger since 0.2.3 and `SqlitePredictionLedger` became
-    # a supported top-level name in 0.2.6; until now nothing here constructed
-    # one, so every prediction this bridge filed died with the process and
-    # `calibration()` had no earlier horizon to grade against.
+    # a supported top-level name in 0.2.6. Handing the session one was half of
+    # it: nothing here FILED a prediction, so the file stayed empty however many
+    # horizons passed. `_file_forecasts` below is the other half, and
+    # `--history` is the third, because grading needs the readings too.
     #
     # NO EXTRA IS DECLARED FOR THIS, and that is measured rather than assumed:
-    # the ledger imports nothing outside the standard library, and the engine
+    # both stores import nothing outside the standard library, and the engine
     # itself publishes no `resident` extra. An extra that installs nothing is
     # ceremony, and a caller who pip-installed it would be told they had gained
     # a capability they already had.
-    ledger = None
-    if getattr(args, "ledger", None):
-        from arbiter_engine import SqlitePredictionLedger
-
-        ledger = SqlitePredictionLedger(args.ledger)
-    session = EngineSession(ledger=ledger) if ledger else EngineSession()
+    try:
+        ledger, history = _open_stores(args)
+    except _StoresUnavailable as error:
+        print(f"\n{error}", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    # The collector's cadence is the file's to declare; `--every` is how often a
+    # resident run actually walks, and they are allowed to differ only openly.
+    declared = float(manifest.sampling_interval_s or DEFAULT_SAMPLE_INTERVAL_S)
+    cadence = float(args.every) if args.every is not None else declared
+    if cadence != declared:
+        print(f"\n--every {cadence:g}s differs from the declared cadence of "
+              f"{declared:g}s; the model counts its windows in declared steps, "
+              f"so a sample every {cadence:g}s fills them at a different rate",
+              file=sys.stderr)
+    horizon = float(args.horizon) if args.horizon is not None else cadence
+    if args.resident:
+        return _resident(args, declaration, model_path, manifest, cadence,
+                         horizon, unreadable_floor, ledger, history)
+    session = EngineSession(history=history, ledger=ledger)
     session.load_model(model_path)
 
-    feed_result = feed(session, manifest, reports)
-    envelope = check(session).to_dict()
-    described = model_describe(session).to_dict()
-    outcome = evaluate(envelope, described, manifest,
-                       strict_declines=args.strict_declines,
-                       feed_result=feed_result)
+    # WHERE EACH WALK LANDS IN TIME: in the order given, one declared interval
+    # apart, unless the operator asks for the times the walks carry. See
+    # `_timed_by` for why that is never inferred from the stamps alone.
+    timed_by = _timed_by(args)
+    try:
+        feed_result = feed(session, manifest, reports, timed_by=timed_by)
+    except PlacementError as error:
+        print(f"\n--by-capture-time cannot place these walks: {error}",
+              file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+    note = _sparse_note(feed_result)
+    if note:
+        print(f"\n{note}", file=sys.stderr)
+    if _cases_asked(args):
+        again = _judged_again(session, getattr(feed_result, "judged_at", None)
+                              or _now(), args.ledger)
+        if again:
+            print(f"\n{again}", file=sys.stderr)
+            return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+    with _pinned(feed_result):
+        envelope = check(session).to_dict()
+        described = model_describe(session).to_dict()
+        outcome = evaluate(envelope, described, manifest,
+                           strict_declines=args.strict_declines,
+                           feed_result=feed_result)
 
-    if args.attest_out:
-        # After `check`, never before: `attest` refuses on an unchecked session with
-        # `source: unavailable`, and that refusal reads a lot like a clean run.
-        from arbiter_engine.api import attest
+        if args.attest_out:
+            # After `check`, never before: `attest` refuses on an unchecked session with
+            # `source: unavailable`, and that refusal reads a lot like a clean run.
+            from arbiter_engine.api import attest
 
-        from presence_audit.attestation import build_attestation
-        # The artifact leaves through a different door from every committed file,
-        # and the hygiene perimeter guards commits. `target` is a Redfish URL by
-        # default, so an artifact uploaded from CI can publish an internal hostname
-        # in a channel no hook ever scans. The label is the operator's override; no
-        # guessing at which hostnames look internal happens here, because that is
-        # pattern-matching a judgement only they can make.
-        artifact = build_attestation(session, envelope, described, manifest,
-                                     target=args.attest_target_label or target,
-                                     attest_fn=attest)
-        Path(args.attest_out).write_text(json.dumps(artifact, indent=2))
+            from presence_audit.attestation import build_attestation
+            # The artifact leaves through a different door from every committed file,
+            # and the hygiene perimeter guards commits. `target` is a Redfish URL by
+            # default, so an artifact uploaded from CI can publish an internal hostname
+            # in a channel no hook ever scans. The label is the operator's override; no
+            # guessing at which hostnames look internal happens here, because that is
+            # pattern-matching a judgement only they can make.
+            artifact = build_attestation(session, envelope, described, manifest,
+                                         target=args.attest_target_label or target,
+                                         attest_fn=attest, spelled=True)
+            Path(args.attest_out).write_text(json.dumps(artifact, indent=2))
 
-        # Said on the terminal, not only inside the file. The artifact already
-        # accounts for this honestly -- `unattested` is a required field and the
-        # shipped validator reads it -- but an operator who asked for evidence and
-        # received an artifact carrying none finds that out only by opening it.
-        # A quiet gap is not a false claim, and it is still a gap nobody sees.
-        #
-        # No exit floor: `check` completed and its findings stand. What did not
-        # complete is the evidence the engine attaches to them, which is a weaker
-        # thing than the audit itself.
-        from presence_audit.report import unattested_notice
+            # Said on the terminal, not only inside the file. The artifact already
+            # accounts for this honestly -- `unattested` is a required field and the
+            # shipped validator reads it -- but an operator who asked for evidence and
+            # received an artifact carrying none finds that out only by opening it.
+            # A quiet gap is not a false claim, and it is still a gap nobody sees.
+            #
+            # No exit floor: `check` completed and its findings stand. What did not
+            # complete is the evidence the engine attaches to them, which is a weaker
+            # thing than the audit itself.
+            from presence_audit.report import unattested_notice
 
-        notice = unattested_notice(artifact, args.attest_out)
-        if notice:
-            print(f"\n{notice}", file=sys.stderr)
-    print(detect_as_text(outcome, feed_result))
+            notice = unattested_notice(artifact, args.attest_out)
+            if notice:
+                print(f"\n{notice}", file=sys.stderr)
+        print(detect_as_text(outcome, feed_result))
+        if args.walk:
+            # The core's report says where walks placed by their own times landed;
+            # this says it for the grid, so a reader of either knows which clock
+            # the verdict was judged on.
+            grid = _grid_lines(feed_result)
+            if grid:
+                print("\n".join(grid))
+        answers = _answers(session, envelope)
+        ranking = _rankings_as_text(session, envelope, manifest, answers)
+        if ranking:
+            print(ranking)
+        if _cases_asked(args):
+            print("\n".join(_keep_cases(session, envelope, answers, args.ledger)))
+
+        if ledger is not None:
+            if args.walk:
+                # A recorded reading has no future anyone will read it against, so a
+                # forecast from it could only ever mature `ungradeable`.
+                print("\nledger: nothing filed -- recorded walks have no future a "
+                      "later run could read a forecast against", file=sys.stderr)
+            else:
+                issued, rolled, withheld = _file_forecasts(session, manifest,
+                                                           horizon, cadence)
+                for reason in withheld:
+                    print(f"coupling filed nothing -- {reason}", file=sys.stderr)
+                print(f"\nfiled {issued} forecast(s)"
+                      + (f" and {rolled} coupling value(s)" if rolled else "")
+                      + f", {horizon:g}s ahead, into {args.ledger}")
+                print(_ledger_line(ledger))
+                if history is None:
+                    print("a later run can grade these only against readings taken "
+                          "near the moment they mature, and this run's readings end "
+                          "with it: pass --history PATH, or run --resident",
+                          file=sys.stderr)
 
     # Composed, not merged. The worse of the four wins, and `2` outranks `1` because
     # could-not-complete is a different claim from something-got-worse. The config
@@ -706,6 +872,1051 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     schema_floor = EXIT_INCOMPLETE if outcome.schema_mismatch else EXIT_CLEAN
     return _exit_contract.compose(stage1, outcome.exit_code,
                                   unreadable_floor, schema_floor)
+
+
+def _stores_refusal(args: argparse.Namespace) -> str | None:
+    """A flag combination that would do nothing, or record something false.
+
+    Refused rather than tolerated, on the family's rule: a flag that changes
+    nothing reads as a flag that worked.
+    """
+    if getattr(args, "history", None) and args.walk:
+        return ("--history keeps readings for a later run to grade forecasts "
+                "against, at the instants they were taken, and a recorded walk is "
+                "not fed at that instant: it takes a slot of a ladder ending NOW, "
+                "or with --by-capture-time the grid slot its time falls in. "
+                "Writing either to a durable store would put moved times into a "
+                "record another run trusts. Use --history with --target")
+    if getattr(args, "by_capture_time", False) and not args.walk:
+        return ("--by-capture-time places recorded walks by the times they "
+                "carry, and this run walks a live target: one reading, taken at "
+                "the clock. Pass --walk, or drop it")
+    if args.resident and not args.target:
+        return ("--resident walks the same live target again and again; it "
+                "needs --target. Recorded walks already hold their whole history")
+    if args.resident and not getattr(args, "ledger", None):
+        return ("--resident exists to file forecasts and grade them as they "
+                "mature; without --ledger they would die with the process. "
+                "Pass --ledger PATH")
+    if not args.resident and (args.every is not None or args.cycles is not None):
+        return ("--every and --cycles set a resident run's cadence and length, "
+                "and this run is not resident; pass --resident, or drop them")
+    if not args.resident and getattr(args, "keep_walks", None):
+        return ("--keep-walks keeps the walks a resident run takes, and this run "
+                "is not resident; one walk is written with `capture --out`")
+    return _cases_refusal(args)
+
+
+def _cases_asked(args: argparse.Namespace) -> bool:
+    return (getattr(args, "case_severity", None) is not None
+            or getattr(args, "case_checks", None) is not None)
+
+
+def _cases_refusal(args: argparse.Namespace) -> str | None:
+    """The case flags, refused where they could not keep an honest case.
+
+    A case closes after a declared number of clean checks in a row, and the
+    board file cannot carry that number -- the core refuses a key it does not
+    read -- so the operator declares it here, both halves or neither. The book
+    lives in the ledger's file, and a case counts walks by the time each was
+    taken: recorded walks placed on a ladder ending at the clock would be
+    judged at a new instant on every re-run, and counted again.
+    """
+    if not _cases_asked(args):
+        return None
+    if args.case_severity is None or args.case_checks is None:
+        return ("--case-severity and --case-checks declare when a case closes, "
+                "together: that many clean checks in a row with nothing at or "
+                "above that severity. Give both, or neither")
+    if args.case_checks < 1:
+        return ("--case-checks is how many clean checks in a row close a case, a "
+                "whole number of at least 1")
+    if not getattr(args, "ledger", None):
+        return ("cases are kept in the ledger's file, so a case opened on one run "
+                "is there to be checked on the next; add --ledger PATH")
+    if args.walk and not getattr(args, "by_capture_time", False):
+        return ("a case counts walks by the time each was taken, and recorded "
+                "walks without --by-capture-time are placed on a ladder ending "
+                "at the clock, so every re-run would count them again; add "
+                "--by-capture-time")
+    return None
+
+
+def _last_judged(session: Any) -> datetime | None:
+    """The latest instant the ledger's case book has judged: a case opening,
+    or a check recorded into one."""
+    from arbiter_engine.api import case_book
+
+    seen = []
+    for case in (case_book(session).to_dict().get("cases") or {}).get("cases") or ():
+        seen.append(case.get("opened_at"))
+        seen += [entry.get("at") for entry in
+                 (case.get("stages") or {}).get("check") or ()]
+    instants = []
+    for when in seen:
+        if not when:
+            continue
+        parsed = datetime.fromisoformat(str(when))
+        instants.append(parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc))
+    return max(instants) if instants else None
+
+
+def _judged_again(session: Any, judged: datetime, ledger_path: str) -> str | None:
+    """Why this run may not be judged into the case book, or None. A check is
+    recorded into every open case, so the same walks judged twice would count
+    one clean reading as two, and close a case on half the evidence."""
+    last = _last_judged(session)
+    at = judged if judged.tzinfo else judged.replace(tzinfo=timezone.utc)
+    if last is not None and at <= last:
+        return (f"{ledger_path} has judged its cases as of {last.isoformat()}, and "
+                f"this run judges {at.isoformat()}; a case counts each walk once "
+                f"-- add a later walk, or run without the case flags")
+    return None
+
+
+def _keep_cases(session: Any, envelope: dict, answers: dict[str, Any],
+                ledger_path: str) -> list[str]:
+    """A case per finding the book does not hold open, and the ranking attached
+    to each case a finding named. The check has already recorded itself into
+    every open case -- the engine does that."""
+    from arbiter_engine.api import attach_stage, case_book, open_case
+
+    book = case_book(session).to_dict().get("cases") or {}
+    held = {(case["entity_id"], case["indicator"]): case["case_id"]
+            for case in book.get("cases") or () if case.get("status") == "open"}
+    opened: list[tuple[str, str]] = []
+    declined: set[str] = set()
+    touched: dict[tuple[str, str], str] = {}
+    for finding in envelope.get("findings") or []:
+        key = (str(finding.get("entity_id")),
+               str(finding.get("problem_type") or "").split(":", 1)[-1])
+        if key not in held:
+            leg = open_case(session, key[0], key[1],
+                            basis=str(finding.get("problem_type") or "")
+                            ).to_dict().get("case") or {}
+            if not leg.get("case_id"):
+                declined |= {str(d.get("reason")) for d in leg.get("not_checked") or []
+                             if d.get("reason")}
+                continue
+            held[key] = leg["case_id"]
+            opened.append(key)
+        touched[key] = held[key]
+    for key, case_id in sorted(touched.items()):
+        if key[0] in answers:
+            attach_stage(session, case_id, "hypothesize", answers[key[0]])
+    after = case_book(session).to_dict().get("cases") or {}
+    lines = [f"\ncases: {len(opened)} opened, {after.get('open')} open, "
+             f"{after.get('resolved')} resolved -- in {ledger_path}"]
+    for key, case_id in sorted(touched.items()):
+        lines.append(f"  {case_id}  {key[0]}.{key[1]}"
+                     + ("  (opened)" if key in opened else ""))
+    if declined:
+        lines.append(f"  not opened -- {', '.join(sorted(declined))}")
+    return lines
+
+
+def _open_stores(args: argparse.Namespace) -> tuple[Any, Any]:
+    """The ledger a run files into and the history it grades against.
+
+    TWO STORES, BECAUSE GRADING NEEDS BOTH. A forecast is scored against the
+    reading nearest `predicted_at + horizon`, inside a grace window. A single
+    walk holds one reading, stamped at NOW -- which is after the window of
+    every forecast an earlier run filed -- so a durable ledger alone grades
+    everything `ungradeable`. The readings have to persist as well, and
+    `SqliteObservationHistory` is the engine's supported name for that.
+    """
+    ledger = history = None
+    if getattr(args, "ledger", None):
+        from arbiter_engine import SqlitePredictionLedger
+
+        ledger = SqlitePredictionLedger(args.ledger)
+    if getattr(args, "history", None):
+        from arbiter_engine import SqliteObservationHistory
+
+        if not hasattr(SqliteObservationHistory, "series_keys"):
+            # Before arbiter-engine 0.2.9 the durable store could not list its
+            # series, and describing a session built over it RAISED. Refused by
+            # name here rather than left to fail three calls later.
+            raise _StoresUnavailable(
+                "--history needs an engine whose durable store can list its "
+                "series, which arrived in arbiter-engine 0.2.9; "
+                "pip install --upgrade 'bmc-sensor-audit[detect]'")
+        history = SqliteObservationHistory(args.history)
+    return ledger, history
+
+
+class _StoresUnavailable(RuntimeError):
+    """The installed engine cannot hold what the flags asked it to."""
+
+
+#: The rollout's refusals that explain why a declared coupling filed NOTHING.
+#: Surfaced by name, because a run that files forecasts for the driver and none
+#: for the coupling reads as a coupling that is being graded when it is not.
+_COUPLING_FILING_REFUSALS = ("gain_not_adopted", "no_declared_tolerance")
+
+
+def _answers(session: Any, envelope: dict) -> dict[str, Any]:
+    """The engine's ranking for each sensor with a finding, asked once each, in
+    the order the findings name them. Kept whole: the text prints part of it,
+    and a case keeps it by reference."""
+    subjects: dict[str, Any] = {}
+    for finding in envelope.get("findings") or []:
+        entity = finding.get("entity_id")
+        if entity and entity not in subjects:
+            from arbiter_engine.api import hypothesize
+
+            subjects[entity] = hypothesize(session, entity)
+    return subjects
+
+
+def _named_reading_line(leg: dict, names: dict) -> str | None:
+    """The one reading the ranking rests on most, in the operator's names.
+
+    The engine computed it for every ranking and this printed the causes alone
+    -- which, on a board declaring no strength, is a list of `unranked` and
+    nothing to do next.
+    """
+    named = leg.get("most_discriminating") or {}
+    reading = named.get("reading")
+    if not reading:
+        return None
+    basis = named.get("basis")
+    why = {"only_candidate": "the only declared cause",
+           "only_open": "the only cause still open",
+           "strengths": "weighed by the declared strengths"}.get(basis, basis)
+    if basis == "screening":
+        screens = named.get("screens") or 0
+        why = (f"read clean, it would screen {screens} other "
+               f"cause{'' if screens == 1 else 's'}" if screens
+               else "the nearest cause still open")
+    return (f"    read first: {_reading_in_names(reading, names)}"
+            + (f" -- {why}" if why else ""))
+
+
+def _reading_in_names(reading: Any, names: dict) -> str:
+    """`<entity>.<property>`, with the entity as the operator's file names it."""
+    entity, _, prop = str(reading).partition(".")
+    return f"{names.get(entity, entity)}.{prop}" if prop else names.get(entity, entity)
+
+
+def _walk_line(leg: dict, names: dict) -> str | None:
+    """Where the engine's walk up from the finding stopped, in the operator's names.
+
+    Its state; where the visible fault stops, each sensor with its findings; and
+    the causes still open, each with the readings it needs and why. A walk whose
+    every declared cause read clean says so: the finding is unexplained, which on
+    a board whose only declared cause reads sound is the true answer. `None` from
+    an engine that gives no walk.
+    """
+    walk = leg.get("walk") or {}
+    state = walk.get("state")
+    if not state:
+        return None
+    parts = []
+    stops = [f"{names.get(e.get('entity'), e.get('entity'))} "
+             f"({', '.join(e.get('findings') or ()) or 'a finding'})"
+             for e in walk.get("frontier") or ()]
+    if stops:
+        parts.append("the fault stops at " + "; ".join(stops))
+    still = []
+    for entry in walk.get("open") or ():
+        needs = ", ".join(f"{_reading_in_names(n.get('reading'), names)} "
+                          f"({n.get('reason')})" for n in entry.get("needs") or ())
+        still.append(names.get(entry.get("entity"), entry.get("entity"))
+                     + (f", needs {needs}" if needs else ""))
+    if still:
+        parts.append("still open: " + "; ".join(still))
+    if state == "unexplained":
+        parts.append("every declared cause read clean, or sits behind one that did")
+    return f"    walk: {state.replace('_', ' ')}" + "".join(f" -- {p}" for p in parts)
+
+
+def _rung_lines(leg: dict, names: dict) -> list[str]:
+    """The first rung down from where the visible fault stops (engine 0.2.32): for
+    each frontier sensor, what it explains below it -- the sensors downstream along
+    declared fault channels that show a finding now -- and the declared actions
+    that apply to it. Nothing from an engine that gives no rung, and nothing on a
+    walk with no frontier, which is every walk on the shipped board while its fan
+    reads inside its bounds."""
+    lines = []
+    for entry in (leg.get("walk") or {}).get("frontier") or ():
+        if "explains" not in entry:
+            continue
+        below = ", ".join(names.get(e.get("entity"), e.get("entity"))
+                          for e in entry.get("explains") or ()) or "nothing with a finding"
+        count = entry.get("findings_explained") or 0
+        acts = ", ".join(entry.get("actions") or ()) or "none declared"
+        lines.append(f"    below {names.get(entry.get('entity'), entry.get('entity'))}: "
+                     f"explains {below} ({count} finding{'' if count == 1 else 's'}); "
+                     f"actions: {acts}")
+    return lines
+
+
+def _own_reading(reading: Any) -> str:
+    """What a cause's own reading said, as the engine computed it.
+
+    The engine computes it for every candidate, and this printed the causes
+    without it, so a cause that read sound was listed beside one that read
+    faulty with nothing to tell them apart. `none` where the engine gave no
+    state: nothing read, or a check on it declined.
+    """
+    if not isinstance(reading, dict) or not reading.get("state"):
+        return "own reading: none"
+    severity = reading.get("severity")
+    return f"own reading: {reading['state']}" + (f", {severity}" if severity else "")
+
+
+def _rankings_as_text(session: Any, envelope: dict, manifest: Any,
+                      answers: dict[str, Any] | None = None) -> str:
+    """What could explain each sensor with a finding, asked of the engine.
+
+    One line per sensor a declared cause reaches: the causes the engine ranked,
+    with their posteriors, or the name it declined under -- `cpt_missing` where
+    a fault channel is declared with no strength, which is the true answer
+    until somebody measures one -- each with what its own reading said; under
+    it where the walk stopped, and the one reading to take first while a cause
+    is still open.
+    Sensors no declared cause reaches are counted under the reason the engine
+    gave, one line per reason. Nothing is printed for a run with no finding, so
+    a clean report reads exactly as it did. Sensors are named as the operator's
+    file names them; the engine's ids are the generated types.
+    """
+    if answers is None:
+        answers = _answers(session, envelope)
+    if not answers:
+        return ""
+
+    names = {point.entity_type: point.declared_name for point in manifest.points}
+    lines = ["", "What could explain it (the engine's ranking of declared causes):"]
+    # Sensors no declared cause reaches share one line per reason: a board with
+    # no fault channel would otherwise print the same refusal once per finding.
+    unexplained: dict[str, list[str]] = {}
+    for entity, answer in answers.items():
+        leg = answer.to_dict().get("hypothesis") or {}
+        declined = sorted({str(d.get("reason")) for d in leg.get("not_checked") or []
+                           if d.get("reason")})
+        causes = leg.get("candidates") or []
+        if not causes:
+            why = ", ".join(declined) or "with no reason given"
+            unexplained.setdefault(why, []).append(names.get(entity, entity))
+            continue
+        ranked = []
+        for cause in causes[:3]:
+            name = names.get(cause.get("cause"), cause.get("cause"))
+            posterior = cause.get("posterior")
+            own = _own_reading(cause.get("own_reading"))
+            if isinstance(posterior, (int, float)):
+                ranked.append(f"{name} {posterior:.2f} ({own})")
+            else:
+                # A cause the engine named and could not score, with the reason
+                # it gave -- `cpt_missing` for a channel nobody gave a strength.
+                why = ", ".join(cause.get("declined") or ()) or "no reason given"
+                ranked.append(f"{name} (unranked: {why}; {own})")
+        lines.append(f"  {names.get(entity, entity)}: {'; '.join(ranked)}")
+        walked = _walk_line(leg, names)
+        if walked:
+            lines.append(walked)
+        lines.extend(_rung_lines(leg, names))
+        named = _named_reading_line(leg, names)
+        if named:
+            lines.append(named)
+    for why, sensors in unexplained.items():
+        shown = ", ".join(sensors[:3]) + (f" and {len(sensors) - 3} more"
+                                          if len(sensors) > 3 else "")
+        lines.append(f"  declined {why}: {len(sensors)} sensor(s) -- {shown}")
+    return "\n".join(lines)
+
+
+def _manifest_as_json(manifest: Any) -> str:
+    """The generated manifest, with this package's own key for its list kept.
+
+    The core serialises the list as `points`, beside the `sensors` it published
+    first through its 0.1 line and alone from its 0.2.0. A reader of this
+    command's manifest has read `sensors`, and in this package's word that is
+    what the list is, so it stays -- with the same list under both keys.
+    """
+    document = manifest.to_dict()
+    if "sensors" not in document and "points" in document:
+        document["sensors"] = document["points"]
+    return json.dumps(document, indent=2)
+
+
+def _file_forecasts(session: Any, manifest: Any, horizon_s: float,
+                    step_s: float) -> tuple[int, int, list[str]]:
+    """File what this cycle predicts, so a later one has something to grade.
+
+    THE LEDGER WAS WIRED AND NOTHING FLOWED INTO IT. `detect` called `check`
+    and `model_describe`, and neither files a prediction -- measured, forty
+    walks through `--ledger` left zero rows. So `calibration()` could not be
+    non-null here however many horizons passed.
+
+    Two sources, and ONLY what the model declares. `project` files the
+    engine's own forecast of every indicator that declares dynamics, with a
+    random walk beside it as the yardstick; a coupling's driver carries one,
+    and nothing else here does. `rollout` files what a DECLARED coupling
+    predicts downstream, and only once its gain has been written down -- with
+    the gain withheld it declines by name and files nothing. No projector is
+    put on a sensor the declaration did not give one: that would grade a model
+    nobody chose.
+
+    THE ROLLOUT IS SEEDED FROM THE DRIVER'S FORECAST, AND UNTIL 0.3.5 IT WAS
+    NOT. Seeded from the current readings with no action scheduled, a rollout
+    moves nothing: every value is held at its reading, nothing any coupling
+    predicts is in it, and the engine declined all of it
+    `no_declared_tolerance` -- whose remedy, a declared spread, cannot help a
+    value nothing moved. Measured on a bench: an adopted gain filed nothing
+    for sixteen cycles WITH a spread declared. Seeded from the forecast, the
+    driver moves, the coupling carries the move downstream, and the forecast's
+    own band passes through the gain -- so an adopted gain is graded with or
+    without a declared spread, which only widens that band by the gain's own
+    doubt.
+    """
+    from arbiter_engine.api import project, rollout
+
+    projection = project(session, horizon_s=horizon_s).to_dict()
+    issued = int(((projection.get("projection") or {}).get("checked") or {})
+                 .get("forecasts_issued", 0) or 0)
+    rolled, withheld = 0, []
+    if getattr(manifest, "coupled", None):
+        simulation = (rollout(session, horizon_s=horizon_s, step_s=step_s,
+                              seed_mode="projected",
+                              file_predictions=True).to_dict()
+                      .get("simulation") or {})
+        rolled = int((simulation.get("checked") or {})
+                     .get("predictions_filed", 0) or 0)
+        # WHY A COUPLING FILED NOTHING, in the engine's words, or it reads as
+        # a coupling being graded.
+        withheld = sorted({f"{d['reason']}: {d.get('detail', '')}"
+                           for d in simulation.get("not_checked") or []
+                           if d.get("reason") in _COUPLING_FILING_REFUSALS})
+    return issued, rolled, withheld
+
+
+def _ledger_line(ledger: Any) -> str:
+    """The ledger's own figures, with their denominators, in one line.
+
+    A rate is printed only once something has been graded -- before that the
+    honest figure is NONE, and a zero would read as a measurement.
+    """
+    cal = ledger.calibration()
+    graded = int(cal.get("confirmed", 0)) + int(cal.get("falsified", 0))
+    parts = [f"ledger: {cal.get('recorded', 0)} recorded, "
+             f"{cal.get('pending', 0)} pending, {graded} graded"]
+    if cal.get("ungradeable"):
+        parts.append(f"{cal['ungradeable']} ungradeable")
+    if graded:
+        parts.append(f"confirm_rate {cal['confirm_rate']:.2f} against an "
+                     f"expected {cal['expected_confirm_rate']:.2f}")
+    else:
+        parts.append("confirm_rate none yet -- nothing has matured")
+    for model_id, row in sorted((cal.get("by_model") or {}).items()):
+        parts.append(f"crps {model_id} {row['crps_approx']:.4g} (n={row['n']})")
+    own = cal.get("own_projections") or {}
+    if own.get("n"):
+        parts.append(f"coupling projections crps {own['crps_approx']:.4g} "
+                     f"(n={own['n']})")
+    return "; ".join(parts)
+
+
+def _resident(args: argparse.Namespace, declaration: Any, model_path: str,
+              manifest: Any, cadence: float, horizon: float,
+              unreadable_floor: int, ledger: Any, history: Any) -> int:
+    """Walk one live target again and again, filing and grading as it goes.
+
+    E2 of the 0.2.7 verification asked for exactly this: a calibration figure
+    that no human had to re-run a command to produce. Each cycle opens a fresh
+    engine session over the SAME two stores, feeds this walk's readings,
+    checks -- which grades every forecast that has matured since -- and files
+    the next ones. So the first figure appears one horizon plus the ledger's
+    grace after the fifth reading, which is the fewest a forecast can be
+    fitted on.
+
+    Each cycle pins the engine's clock to its own start, so the readings it
+    feeds and the forecasts it files carry one instant between them.
+    """
+    from arbiter_engine.api import EngineSession, as_of, check, model_describe
+
+    from presence_audit.feeder import evaluate, feed
+    from presence_audit.report import detect_as_text
+
+    if history is None:
+        from arbiter_engine import InMemoryObservationHistory
+
+        history = InMemoryObservationHistory()
+    print(f"\nresident: walking {args.target} every {cadence:g}s and filing "
+          f"forecasts {horizon:g}s ahead into {args.ledger}"
+          + (f", for {args.cycles} cycle(s)" if args.cycles else
+             ", until interrupted"), file=sys.stderr)
+    # THE RAW WALKS, KEPT. The ledger holds what was forecast and the history
+    # what was read, and neither is what `adopt` fits from: it takes walks. So
+    # without these a resident run could grade a board for a day and leave
+    # nothing to adopt a gain from -- and nothing anyone else could re-derive
+    # its figures from.
+    kept = None
+    if getattr(args, "keep_walks", None):
+        kept = Path(args.keep_walks)
+        kept.mkdir(parents=True, exist_ok=True)
+        print(f"resident: keeping each cycle's walk in {kept}", file=sys.stderr)
+    client = _client(args)
+    if _cases_asked(args):
+        probe = EngineSession(history=history, ledger=ledger)
+        again = _judged_again(probe, _now(), args.ledger)
+        if again:
+            print(f"\nresident: {again}", file=sys.stderr)
+            return EXIT_INCOMPLETE
+    worst: int | None = None
+    said_withheld: list[str] = []
+    cycle = 0
+    try:
+        while args.cycles is None or cycle < args.cycles:
+            cycle += 1
+            at = _now()
+            with as_of(at):
+                walk = walk_chassis(client)
+                if kept is not None:
+                    # BEFORE it is judged, so a cycle that fails to complete
+                    # still leaves the raw walk that explains why.
+                    (kept / f"walk-{at:%Y%m%dT%H%M%SZ}.json").write_text(
+                        json.dumps(walk.to_dict(), indent=2))
+                report = compare(declaration, walk,
+                                 include_disabled_in_config=args.include_disabled)
+                if not report.walk_complete:
+                    code = EXIT_INCOMPLETE
+                    summary = "walk incomplete; nothing fed, nothing filed"
+                else:
+                    session = EngineSession(history=history, ledger=ledger)
+                    session.load_model(model_path)
+                    feed_result = feed(session, manifest, [report])
+                    envelope = check(session).to_dict()
+                    described = model_describe(session).to_dict()
+                    outcome = evaluate(envelope, described, manifest,
+                                       strict_declines=args.strict_declines,
+                                       feed_result=feed_result)
+                    answers = _answers(session, envelope)
+                    kept_cases = (_keep_cases(session, envelope, answers, args.ledger)
+                                  if _cases_asked(args) else [])
+                    if cycle == 1:
+                        print(as_text(report, target=args.target))
+                        print(detect_as_text(outcome, feed_result))
+                        ranking = _rankings_as_text(session, envelope, manifest,
+                                                    answers)
+                        if ranking:
+                            print(ranking)
+                        if kept_cases:
+                            print("\n".join(kept_cases))
+                    issued, rolled, withheld = _file_forecasts(
+                        session, manifest, horizon, cadence)
+                    if withheld and withheld != said_withheld:
+                        for reason in withheld:
+                            print(f"coupling filed nothing -- {reason}",
+                                  file=sys.stderr)
+                        said_withheld = withheld
+                    stage1 = EXIT_REGRESSION if report.regressions else EXIT_CLEAN
+                    schema_floor = (EXIT_INCOMPLETE if outcome.schema_mismatch
+                                    else EXIT_CLEAN)
+                    code = _exit_contract.compose(stage1, outcome.exit_code,
+                                                  unreadable_floor, schema_floor)
+                    summary = (f"{len(report.regressions)} regression(s), "
+                               f"{len(outcome.findings)} finding(s); filed "
+                               f"{issued} forecast(s)"
+                               + (f" and {rolled} coupling value(s)"
+                                  if rolled else "")
+                               + (f"; cases {kept_cases[0].split(': ', 1)[1].split(' -- ')[0]}"
+                                  if kept_cases else ""))
+                line = _ledger_line(ledger)
+            print(f"cycle {cycle} at {at:%Y-%m-%dT%H:%M:%SZ}: exit {code} -- "
+                  f"{summary}; {line}")
+            worst = code if worst is None else _exit_contract.compose(worst, code)
+            if args.cycles is None or cycle < args.cycles:
+                _sleep(cadence)
+    except KeyboardInterrupt:
+        print(f"\nresident: stopped after {cycle} cycle(s)", file=sys.stderr)
+    # No cycle completed is not a clean board: nothing was verified.
+    return EXIT_INCOMPLETE if worst is None else worst
+
+
+def _case_session(ledger_path: str) -> tuple[Any, str | None]:
+    """A session on an EXISTING ledger, or why not. Opening a mistyped path
+    would create an empty ledger, and a confirmation filed there is lost."""
+    if not Path(ledger_path).is_file():
+        return None, (f"there is no ledger at {ledger_path}; `detect --ledger "
+                      f"--case-severity` keeps one")
+    try:
+        from arbiter_engine import SqlitePredictionLedger
+        from arbiter_engine.api import EngineSession
+    except ImportError as error:
+        return None, (f"cases need the optional extra, which is not installed: "
+                      f"{error}\n    pip install 'bmc-sensor-audit[detect]'")
+    return EngineSession(ledger=SqlitePredictionLedger(ledger_path)), None
+
+
+#: What a ranking's order rested on, as the engine reports it on a confirmed row.
+_RANKED_BY = {"posterior": "by posterior", "hops": "by hop order, no strength declared",
+              "mixed": "partly by posterior, partly by hop order",
+              "standing": "by its standing on the walk, not by posterior"}
+
+
+#: Where a confirmed cause stood on the last walk before it, as the engine
+#: reports it from 0.2.31.
+_STOOD = {"frontier": "at the frontier of {walk}", "trail": "on the trail of {walk}",
+          "open": "open on {walk}", "screened": "screened on {walk}",
+          "beyond_bound": "past the hop bound of {walk}",
+          "not_connected": "outside {walk}"}
+
+
+def _where_it_stood(row: dict) -> str | None:
+    """Where the cause stood on that walk, or None when the ranking kept none.
+
+    A rank alone read the walk's own surprise as a success: the fan, the board's
+    only declared cause, stood first of one even when the walk had read it
+    sound and screened it."""
+    template = _STOOD.get(row.get("standing"))
+    if template is None:
+        return None
+    state = str(row.get("walk_state") or "").replace("_", " ")
+    walk = (f"{'an' if state[:1] in 'aeiou' else 'a'} {state} walk" if state
+            else "the walk")
+    return template.format(walk=walk)
+
+
+def _confirmation_line(row: dict) -> str:
+    """One confirmation, read back against the ranking its case held before it."""
+    if row.get("rank"):
+        stood = f"ranked {row['rank']} of {row['of']}"
+        rested = _RANKED_BY.get(row.get("ranked_by"))
+        if rested:
+            stood += f" ({rested})"
+    elif row.get("of"):
+        stood = f"not among the {row['of']} ranked before it"
+    else:
+        stood = "no ranking came before it"
+    where = _where_it_stood(row)
+    if where:
+        stood += f", {where}"
+    settled = row.get("settling_reading_was_named")
+    given, named = row.get("settling_reading"), row.get("named_reading")
+    if not given:
+        reading = "no reading given"
+    elif settled is None:
+        reading = f"settled by {given}; the ranking named no reading"
+    elif settled:
+        reading = f"settled by {given}, the reading the ranking named"
+    elif row.get("settling_entity_was_named"):
+        reading = f"settled by {given}; the ranking named {named}, on the same sensor"
+    else:
+        reading = f"settled by {given}; the ranking named {named}"
+    return f"case {row.get('case_id')}: {row.get('cause')} {stood}; {reading}"
+
+
+def _cmd_confirm(args: argparse.Namespace) -> int:
+    """Record the cause a person confirmed, and the reading that settled it.
+
+    The engine reads it back against the last ranking the case held: where the
+    cause stood, and whether the reading that settled it was the one named. A
+    confirmation is not a surprise entry -- every case here began with a
+    finding, so a corpus written from them would hold nothing but detections.
+    """
+    session, why = _case_session(args.ledger)
+    if why:
+        print(why, file=sys.stderr)
+        return EXIT_INCOMPLETE
+    from arbiter_engine.api import attach_stage, case_book
+
+    reference = {"cause": args.cause, "basis": args.basis}
+    if args.reading:
+        reference["reading"] = args.reading
+    leg = attach_stage(session, args.case_id, "confirm",
+                       reference=reference).to_dict().get("case") or {}
+    declined = leg.get("not_checked") or []
+    for decline in declined:
+        print(f"not recorded -- {decline.get('reason')}: {decline.get('detail')}",
+              file=sys.stderr)
+    if declined:
+        return EXIT_INCOMPLETE
+    rows = [row for row in ((case_book(session).to_dict().get("cases") or {})
+                            .get("confirmed") or {}).get("rows") or []
+            if row.get("case_id") == args.case_id]
+    print(_confirmation_line(rows[-1]))
+    return EXIT_CLEAN
+
+
+def _cmd_cases(args: argparse.Namespace) -> int:
+    """Every case the ledger keeps, and each confirmation read back."""
+    session, why = _case_session(args.ledger)
+    if why:
+        print(why, file=sys.stderr)
+        return EXIT_INCOMPLETE
+    from arbiter_engine.api import case_book
+
+    book = case_book(session).to_dict().get("cases") or {}
+    if args.json:
+        print(json.dumps({key: book.get(key) for key in
+                          ("opened", "open", "resolved", "reopened", "confirmed",
+                           "cases")},
+                         indent=2, default=str))
+        return EXIT_CLEAN
+    print(f"{book.get('opened')} case(s): {book.get('open')} open, "
+          f"{book.get('resolved')} resolved, {book.get('reopened') or 0} reopened "
+          f"-- in {args.ledger}")
+    for case in book.get("cases") or []:
+        checks = ", ".join(entry.get("outcome") for entry in
+                           (case.get("stages") or {}).get("check") or [])
+        print(f"  {case['case_id']}  {case['entity_id']}.{case['indicator']}  "
+              f"{case['status']}  since {case['opened_at']}  "
+              f"checks: {checks or 'none yet'}")
+    confirmed = book.get("confirmed") or {}
+    if confirmed.get("confirmations"):
+        print(f"confirmed: {confirmed['confirmations']}, {confirmed['ranked_first']} "
+              f"ranked first, {confirmed.get('ranked_first_by_posterior', 0)} of "
+              f"them by posterior, {confirmed.get('confirmed_after_screened', 0)} "
+              f"after the walk had screened them; the reading that settled it was the "
+              f"one named in "
+              f"{confirmed.get('settling_reading_was_named')} of the "
+              f"{confirmed.get('settling_reading_given')} that gave one")
+        for row in confirmed.get("rows") or []:
+            print("  " + _confirmation_line(row))
+    return EXIT_CLEAN
+
+
+def _cmd_adopt(args: argparse.Namespace) -> int:
+    """Write one fitted gain into the supplemental file, or say why not.
+
+    Runs the same pipeline `detect` runs, from the same inputs, rather than
+    reading a number off an earlier report. Adopting is the one act here that
+    changes what a later audit asserts, and it should not be possible to do it
+    against a printout of a file that has since been edited. The cost is
+    passing the walks twice, which is what `detect` already asks for.
+    """
+    from . import adopt as _adopt
+
+    declaration = load_declaration(args.config)
+    declaration, refusal = _with_declaration_sources(declaration, args.declaration)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return EXIT_INCOMPLETE
+    if not declaration.sensors:
+        print("no sensors declared by any file under the given paths", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    # THE SAME FLOOR `coverage` AND `detect` APPLY, and it was missing from the
+    # first draft of this command -- caught by the derived guard table, which
+    # parametrises over every `--config` subcommand precisely so a new one
+    # cannot quietly skip it. A directory with one unparseable file returned 0
+    # here: an unreadable configuration is not a clean board, it is an unknown
+    # one, and adopting a number measured against part of a machine is worse
+    # than not adopting it.
+    unreadable_floor = _report_unreadable(declaration)
+
+    try:
+        import yaml
+        from arbiter_engine.api import EngineSession, model_describe
+    except ImportError as error:
+        print(f"adopt needs the optional extra, which is not installed: {error}\n"
+              "    pip install 'bmc-sensor-audit[detect]'", file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+
+    from presence_audit.feeder import PlacementError, feed
+    from presence_audit.generator import generate
+    from presence_audit.supplemental import (SupplementalError, load_supplemental,
+                                             unmatched_names)
+
+    try:
+        supplemental = load_supplemental(args.supplemental)
+    except SupplementalError as error:
+        print(str(error), file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+    if not supplemental.couplings:
+        print(f"{args.supplemental} declares no couplings, so there is nothing "
+              f"to fit.", file=sys.stderr)
+        # 2 only when a proposal was NAMED, because then the thing asked for
+        # cannot exist. Asking what was fitted and being told nothing is an
+        # answer, not a failure -- the same line this package already draws for
+        # liveness warming up.
+        return _exit_contract.compose(
+            EXIT_INCOMPLETE if args.proposal else EXIT_CLEAN,
+            unreadable_floor)
+    missing = unmatched_names(supplemental,
+                              {s.display_name for s in declaration.sensors})
+    if missing:
+        print(f"{args.supplemental} names {len(missing)} sensor(s) this "
+              f"configuration does not declare:", file=sys.stderr)
+        for name in missing:
+            print(f"    {name}", file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+
+    walks = [_load_recorded_walk(path) for path in args.walk]
+    walks, ordering = order_walks(walks)
+    if ordering:
+        print(f"{ordering}", file=sys.stderr)
+    reports = [compare(declaration, walk,
+                       include_disabled_in_config=args.include_disabled)
+               for walk in walks]
+    if not reports[-1].walk_complete:
+        # The same floor `detect` applies, and for a stronger reason here: an
+        # incomplete walk is a partial series, and a gain fitted on one is a
+        # number about a window that did not happen.
+        print("walk incomplete; nothing fitted", file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+
+    model, manifest = generate(declaration, domain_id="bmc-sensor-audit",
+                               expect_variation=not args.no_stuck_at,
+                               supplemental=supplemental)
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+        handle.write(yaml.safe_dump(model))
+        model_path = handle.name
+    session = EngineSession()
+    session.load_model(model_path)
+    # Placed as `detect` places recorded walks, so the two commands fit and
+    # judge one series on one clock.
+    try:
+        feed_result = feed(session, manifest, reports, timed_by=_timed_by(args))
+    except PlacementError as error:
+        print(f"--by-capture-time cannot place these walks: {error}",
+              file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+    note = _sparse_note(feed_result)
+    if note:
+        print(note, file=sys.stderr)
+
+    corpus = None
+    if args.surprises:
+        from arbiter_engine.surprises import load_surprises
+
+        corpus, declines = load_surprises(args.surprises)
+        if declines:
+            # Refused, not warned. A corpus with unread keys scores a different
+            # set of entries from the one the operator wrote, and the replay
+            # gate below is the whole reason this command has a corpus at all.
+            print(f"{args.surprises} carries keys this engine does not read:",
+                  file=sys.stderr)
+            for decline in declines:
+                print(f"    {decline}", file=sys.stderr)
+            return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+
+    with _pinned(feed_result):
+        described = model_describe(session, corpus).to_dict()
+    candidates = _adopt.proposals(described, manifest,
+                                  grid_seconds=feed_result.interval_seconds)
+
+    if feed_result.couplings_not_fed:
+        print(f"{len(feed_result.couplings_not_fed)} declared coupling(s) did "
+              f"not reach the model this run:", file=sys.stderr)
+        for entry in feed_result.couplings_not_fed:
+            print(f"    {entry['from']} -> {entry['to']}: "
+                  f"{', '.join(entry['missing'])} not reading", file=sys.stderr)
+
+    if args.list or not args.proposal:
+        # An inspection, and it does not fail. A run that fitted nothing has not
+        # gone wrong: a gain needs both ends reading across enough paired
+        # changes, and not having them yet is the same fact as liveness warming
+        # up, which this package reports at 0 rather than at 2.
+        print(_render_proposals(candidates, feed_result))
+        return _exit_contract.compose(EXIT_CLEAN, unreadable_floor)
+
+    try:
+        proposal = _adopt.find(candidates, args.proposal)
+        stamp = _adopt.check(proposal, force=args.force)
+        when = _adopt.now()
+        basis = _adopt.basis_for(proposal, when=when, stamp=stamp)
+        spread_basis = (_adopt.spread_basis_for(proposal, when=when)
+                        if proposal.spread is not None else None)
+        if args.dry_run:
+            print(f"would set gain {proposal.gain:.6g} on {proposal.id}")
+            print(f"would set gain_basis:\n    {basis}")
+            if spread_basis is not None:
+                print(f"would set gain_sigma {proposal.spread:.6g}")
+                print(f"would set gain_sigma_basis:\n    {spread_basis}")
+                raise_to = _adopt.format_for_spread(
+                    _adopt.declared_format(args.supplemental))
+                if raise_to is not None:
+                    print(f"would raise the format to {raise_to!r}, the "
+                          f"oldest that carries a spread")
+            else:
+                print(_no_spread(proposal), file=sys.stderr)
+            print(f"\n{args.supplemental} is unchanged (--dry-run).")
+            return _exit_contract.compose(EXIT_CLEAN, unreadable_floor)
+        written = _adopt.write(args.supplemental, proposal, basis, spread_basis)
+    except _adopt.AdoptionRefused as error:
+        print(str(error), file=sys.stderr)
+        return _exit_contract.compose(EXIT_INCOMPLETE, unreadable_floor)
+
+    print(f"{args.supplemental}: {proposal.id} now declares gain "
+          f"{proposal.gain:.6g}"
+          + (f" with gain_sigma {written.spread:.6g}"
+             if written.spread is not None else ""))
+    print(f"  {basis}")
+    if written.spread is not None:
+        print(f"  {spread_basis}")
+    if written.format_raised_to is not None:
+        print(f"\nThe format was raised from {written.format_raised_from!r} to "
+              f"{written.format_raised_to!r}, the oldest that carries a "
+              f"spread: a build reading only the older one refuses this file "
+              f"by name rather than dropping the spread.")
+    if written.spread is None:
+        print(_no_spread(proposal), file=sys.stderr)
+    if stamp:
+        print(f"\nThis number is in your file WITHOUT evidence that adopting "
+              f"it catches more. The basis says so; nothing else will.",
+              file=sys.stderr)
+    return _exit_contract.compose(EXIT_CLEAN, unreadable_floor)
+
+
+def _no_spread(proposal) -> str:
+    """Why an adopted gain went in without a spread, and what that costs."""
+    why = ("the engine proposed none with this fit"
+           if proposal.gain_sigma is None else
+           f"the fit's standard error is {proposal.gain_sigma:.3g}, and a "
+           f"spread is a positive number")
+    return (f"\nNo gain_sigma was written: {why}. This coupling's projections "
+            f"are still graded, against a band that treats the gain as exact "
+            f"until a spread is stated with its basis.")
+
+
+def _timed_by(args: argparse.Namespace) -> str:
+    """How recorded walks are placed in time: by the times they carry when the
+    operator passes `--by-capture-time`, otherwise one declared interval apart
+    in the order given.
+
+    ASKED FOR, NEVER INFERRED FROM THE STAMPS. A walk's time says when it was
+    taken, not that it was taken at the declared cadence, and the model's
+    windows count declared intervals. Measured on twelve stamped walks of a
+    frozen fan, declared cadence 60 s: placed by time, walks taken 2 s apart
+    share slots and are refused, and walks taken an hour apart leave every
+    window holding one reading, so the frozen fan passes; placed in order, it
+    is found both times. A harness capturing walks back to back is the first
+    case, and it is how two consumers of this package exercise it.
+    """
+    from presence_audit.feeder import TIMED_BY_CAPTURE, TIMED_BY_INTERVAL
+
+    return (TIMED_BY_CAPTURE if getattr(args, "by_capture_time", False)
+            else TIMED_BY_INTERVAL)
+
+
+def _sparse_note(feed_result) -> str | None:
+    """Why a run placed by time may judge less than it looks, when it may.
+
+    More empty slots than walks means the walks were taken further apart than
+    the declared cadence, and a window that counts declared slots then holds
+    fewer readings than it counts: a frozen reading can pass. Said, not
+    refused -- the operator asked for these times, and the empty slots are
+    what they say.
+    """
+    from presence_audit.feeder import TIMED_BY_CAPTURE
+
+    timing = getattr(feed_result, "timing", None) or {}
+    if (timing.get("timed_by") != TIMED_BY_CAPTURE
+            or timing["empty_slots"] <= timing["captures"]):
+        return None
+    return (f"{timing['empty_slots']} of {timing['slots']} slots are empty: these "
+            f"walks were taken further apart than the declared "
+            f"{timing['interval_seconds']:g}s, and a window counts declared slots, "
+            f"so it holds fewer readings than it counts. Declare the cadence the "
+            f"walks were taken at")
+
+
+def _pinned(feed_result):
+    """The engine's clock for judging what was fed: the newest walk's own time
+    when the walks were placed by their capture times, because their readings
+    are where they were taken and every window ends at the clock. On the grid,
+    the clock as it is: that ladder already ends at it."""
+    from contextlib import nullcontext
+
+    judged = getattr(feed_result, "judged_at", None)
+    if judged is None:
+        return nullcontext()
+    from arbiter_engine.api import as_of
+
+    return as_of(judged)
+
+
+def _grid_lines(feed_result) -> list[str]:
+    """Where recorded walks were placed when not by their own times: one declared
+    interval apart, in the order given, the last at the clock. Said because a
+    verdict on those walks is judged on a clock the walks never read, and the
+    reader of a run placed by time is told its placement; this one was not."""
+    from presence_audit.feeder import TIMED_BY_INTERVAL
+
+    timing = getattr(feed_result, "timing", None) or {}
+    if timing.get("timed_by") != TIMED_BY_INTERVAL:
+        return []
+    return ["", f"Placed on the declared grid: one walk every "
+                f"{timing['interval_seconds']:g}s in the order given, the last at "
+                f"the clock. --by-capture-time places them by the times they carry"]
+
+
+def _timing_lines(feed_result) -> list[str]:
+    """Where the walks were placed.
+
+    By capture time, the largest snap is the one number nothing else shows: a
+    collector drifting from its declared cadence moves it, and not the fit. On
+    the grid, that the walks were placed one interval apart ending at the clock.
+    """
+    from presence_audit.feeder import TIMED_BY_CAPTURE
+
+    timing = getattr(feed_result, "timing", None) or {}
+    if timing.get("timed_by") != TIMED_BY_CAPTURE:
+        return _grid_lines(feed_result)
+    return ["", f"Placed by each walk's capture time: {timing['captures']} walks in "
+                f"{timing['slots']} slots of {timing['interval_seconds']:g}s, "
+                f"{timing['empty_slots']} empty; the largest snap to a slot was "
+                f"{timing['largest_offset_s']:g}s, as of {timing['last']}"]
+
+
+def _cut_lines(feed_result) -> list[str]:
+    """The sensors fed only from their last missed reading on, and what it cost.
+
+    A coupling endpoint that missed one reading in one walk used to be fed with
+    every earlier reading a slot out of place, and the fit paired the driver
+    with the wrong walk of the driven: one missed reading of 200 fitted -0.0021
+    against a true 0.004. On the grid the core feeds such a sensor from its last
+    miss on. Said here because the fit below then rests on fewer walks than were
+    passed, and `n` alone does not say why. Walks placed by their capture times
+    are never cut: a missed reading is an empty slot there, not a shift.
+    """
+    if not feed_result.cut:
+        return []
+    lines = ["", "Fed only from the last missed reading on, so each reading "
+                 "stays in its own walk's slot:"]
+    for name, entry in sorted(feed_result.cut.items()):
+        lines.append(f"  {name}: {entry['fed']} of {entry['fed'] + entry['not_fed']} "
+                     f"readings; it missed walk {entry['missed']} of "
+                     f"{entry['captures']}")
+    return lines
+
+
+def _render_proposals(candidates, feed_result) -> str:
+    """What was fitted, and what each one would be adopted on."""
+    if not candidates:
+        return "\n".join(
+            ["Nothing fitted. A coupling is fitted only when both ends were "
+             "reading across enough paired changes; `detect` reports which."]
+            + _timing_lines(feed_result) + _cut_lines(feed_result))
+    lines = [f"Fitted on a {feed_result.interval_seconds:g}s collection grid:", ""]
+    for candidate in candidates:
+        lines.append(f"  {candidate.id}")
+        low, high = candidate.interval
+        lines.append(f"      gain {candidate.gain:.6g}  n {candidate.n}  "
+                     f"r_squared {candidate.r_squared:.4g}  "
+                     f"interval [{low:.6g}, {high:.6g}]  "
+                     f"{candidate.response_model}")
+        lines.append(f"      gain_sigma {candidate.spread:.6g}, written beside "
+                     f"the gain as its spread"
+                     if candidate.spread is not None else
+                     "      gain_sigma none -- its projections would be graded "
+                     "as though the gain were exact")
+        if candidate.declared_gain is not None:
+            lines.append(f"      declared {candidate.declared_gain:g} already; "
+                         f"a fit that disagrees is a finding, not an edit")
+        elif candidate.replay_ran:
+            lines.append(f"      replay: detected "
+                         f"{candidate.replay.get('detected_before')} -> "
+                         f"{candidate.replay.get('detected_after')} of "
+                         f"{candidate.replay.get('confirmed')} confirmed "
+                         f"(delta {candidate.delta:+d})")
+        else:
+            lines.append("      replay: none -- "
+                         f"{candidate.replay.get('reason')}")
+    return "\n".join(lines + _timing_lines(feed_result)
+                     + _cut_lines(feed_result))
 
 
 def _cmd_regression(args: argparse.Namespace) -> int:
@@ -725,6 +1936,16 @@ def _cmd_regression(args: argparse.Namespace) -> int:
 
     before = _load_recorded_walk(args.before)
     after = _load_recorded_walk(args.after)
+    # TWO EMPTY WALKS COMPARE AS NOTHING, not as a clean upgrade. Each is a legal
+    # capture of a chassis reporting no sensor, and the diff of two of them pairs,
+    # removes and adds nothing -- which printed *No changes. Every sensor reported
+    # before is reported now* and exited 0, over no sensor at all. Read off this
+    # package's own walks, so it holds on every core in the declared range.
+    if not before.sensors and not after.sensors:
+        print(f"neither {args.before} nor {args.after} holds a single sensor, so no "
+              f"change could have been seen: two empty walks compare as nothing, "
+              f"not as a clean upgrade", file=sys.stderr)
+        return EXIT_INCOMPLETE
 
     # The two captures are named, not sorted. `order_walks` exists because a glob
     # hands over lexical order; here the operator has typed which is which, and
@@ -739,7 +1960,8 @@ def _cmd_regression(args: argparse.Namespace) -> int:
         return EXIT_INCOMPLETE
 
     report = compare_walks(before, after, prefix_map=prefix_map)
-    print(regression_as_json(report, before=args.before, after=args.after) if args.json
+    print(regression_as_json(report, before=args.before, after=args.after,
+                             spelled=True) if args.json
           else regression_as_text(report, before=args.before, after=args.after))
 
     if args.strict_fields and not args.json:
@@ -781,6 +2003,17 @@ def _cmd_validate_attestation(args: argparse.Namespace) -> int:
         return EXIT_INCOMPLETE
 
     problems = validate_attestation(artifact)
+    # AN ATTESTATION OF NOTHING, refused here as well as in the core, so the
+    # refusal holds on every core this package admits; the core's own sentence is
+    # the one printed where it has it. A run over an empty walk writes a valid
+    # artifact recording zero entities checked, which reads like a clean board.
+    checked = artifact.get("checked") if isinstance(artifact, dict) else None
+    if (isinstance(checked, dict) and checked.get("entities") == 0
+            and not any("checked.entities" in problem for problem in problems)):
+        problems.append(
+            "checked.entities is 0: the run this artifact records put nothing in "
+            "front of the engine, so it attests nothing -- and an empty judgment "
+            "reads exactly like a clean one")
     if problems:
         print(f"{args.path}: {len(problems)} problem(s)", file=sys.stderr)
         for problem in problems:
@@ -913,6 +2146,18 @@ def build_parser() -> argparse.ArgumentParser:
                               "inventory moves with firmware")
     declare.set_defaults(func=_cmd_declare)
 
+    census = subparsers.add_parser(
+        "census", help="count what a whole configuration corpus declares, and "
+                       "name the revision counted")
+    census.add_argument("directory",
+                        help="the directory the configurations are in, e.g. an "
+                             "entity-manager checkout's configurations/")
+    census.add_argument("--json", action="store_true", help="machine-readable output")
+    census.add_argument("--top", type=int, default=10, metavar="N",
+                        help="how many of the largest not-a-sensor types to list "
+                             "(default 10; the JSON carries every type)")
+    census.set_defaults(func=_cmd_census)
+
     coverage = subparsers.add_parser(
         "coverage", help="diff a declaration against what a machine reports")
     coverage.add_argument("--config", required=True, action="append",
@@ -981,11 +2226,112 @@ def build_parser() -> argparse.ArgumentParser:
                              "its URL; a BMC hostname names an internal machine and "
                              "an artifact uploaded from CI publishes it")
     detect.add_argument("--ledger", metavar="PATH",
-                        help="keep this run's predictions in a SQLite file so a "
-                             "later run can be graded against them; without it "
-                             "the engine keeps them in memory and they are gone "
-                             "when the process exits")
+                        help="file the engine's own forecasts into a SQLite "
+                             "ledger, so a later run -- or a later --resident "
+                             "cycle -- can grade them as they mature. Only what "
+                             "the model declares is forecast: a coupling's "
+                             "driver, and a coupling once its gain is written "
+                             "down. Recorded walks file nothing")
+    detect.add_argument("--history", metavar="PATH",
+                        help="keep the readings in a SQLite file too. A forecast "
+                             "is graded against the reading nearest the moment "
+                             "it matures, which one walk never holds, so a "
+                             "ledger shared between separate runs needs this. "
+                             "Live targets only")
+    detect.add_argument("--resident", action="store_true",
+                        help="walk the --target again and again in one process, "
+                             "grading each cycle's matured forecasts and filing "
+                             "the next; needs --ledger")
+    detect.add_argument("--every", type=float, metavar="SECONDS",
+                        help="how often a --resident run walks; defaults to the "
+                             "cadence the supplemental file declares, else 60")
+    detect.add_argument("--cycles", type=int, metavar="N",
+                        help="stop a --resident run after N walks; without it the "
+                             "run continues until interrupted")
+    detect.add_argument("--horizon", type=float, metavar="SECONDS",
+                        help="how far ahead each forecast is filed; defaults to "
+                             "one collection step")
+    detect.add_argument("--by-capture-time", action="store_true",
+                        help="place each --walk in the collection slot its own "
+                             "capture time falls in, leave the slots of walks "
+                             "nobody took empty, and judge the run as of the "
+                             "newest walk. Every walk must carry a time, and the "
+                             "declared cadence must be the one they were taken "
+                             "at. Without it, walks are placed one declared "
+                             "interval apart in the order given")
+    detect.add_argument("--keep-walks", metavar="DIR",
+                        help="write each --resident cycle's walk into DIR, one "
+                             "file per cycle named by its instant, so `adopt "
+                             "--walk` can fit from the readings this run graded "
+                             "and the figures can be re-derived from the raw "
+                             "walks. Resident runs only")
+    detect.add_argument("--case-severity", metavar="SEVERITY",
+                        help="keep a case per finding in the --ledger file, closed "
+                             "after --case-checks clean checks in a row with nothing "
+                             "at or above this severity (warning, critical). Your "
+                             "number: the board file cannot carry it")
+    detect.add_argument("--case-checks", type=int, metavar="N",
+                        help="how many clean checks in a row close a case")
     detect.set_defaults(func=_cmd_detect)
+
+    confirm = subparsers.add_parser(
+        "confirm", help="record the cause a person confirmed on a case")
+    confirm.add_argument("--ledger", required=True, metavar="PATH",
+                         help="the ledger `detect --case-severity` kept the case in")
+    confirm.add_argument("case_id")
+    confirm.add_argument("--cause", required=True, metavar="SENSOR",
+                         help="the sensor a person found to be the cause")
+    confirm.add_argument("--reading", metavar="SENSOR.PROPERTY",
+                         help="the reading that settled it")
+    confirm.add_argument("--basis", required=True, metavar="TEXT",
+                         help="who says so, and on what record")
+    confirm.set_defaults(func=_cmd_confirm)
+
+    cases = subparsers.add_parser("cases", help="every case a ledger keeps")
+    cases.add_argument("--ledger", required=True, metavar="PATH")
+    cases.add_argument("--json", action="store_true",
+                       help="print the engine's case book as JSON")
+    cases.set_defaults(func=_cmd_cases)
+
+    adopt = subparsers.add_parser(
+        "adopt",
+        help="write a fitted coupling gain into the supplemental file")
+    adopt.add_argument("--config", required=True, action="append",
+                       help="entity-manager JSON file or directory (repeatable)")
+    adopt.add_argument("--declaration", action="append", metavar="PATH",
+                       help=_DECLARATION_HELP)
+    adopt.add_argument("--walk", required=True, action="append",
+                       help="a recorded walk; repeatable, OLDEST FIRST -- a gain "
+                            "is fitted from history and one walk is one sample")
+    adopt.add_argument("--supplemental", required=True,
+                       help="the declarations file to fit from and write into")
+    adopt.add_argument("--proposal", metavar="ID",
+                       help="which fitted gain to adopt, as `<driver> -> "
+                            "<driven>` in your own point names. Omit to list")
+    adopt.add_argument("--list", action="store_true",
+                       help="show what this run fitted and adopt nothing")
+    adopt.add_argument("--surprises", metavar="PATH",
+                       help="a surprise corpus for this domain. Without one "
+                            "nothing can say whether adopting a proposal would "
+                            "catch more, and adopt refuses rather than "
+                            "scoring it zero")
+    adopt.add_argument("--force", action="store_true",
+                       help="adopt even though the replay found no gain, or "
+                            "found no corpus. Stamps the basis with which of "
+                            "those it was")
+    adopt.add_argument("--dry-run", action="store_true",
+                       help="print what would be written and write nothing")
+    adopt.add_argument("--include-disabled", action="store_true")
+    adopt.add_argument("--no-stuck-at", action="store_true",
+                       help="do not expect readings to vary")
+    adopt.add_argument("--by-capture-time", action="store_true",
+                       help="fit on each walk placed in the collection slot its "
+                            "own capture time falls in, so a missed reading or "
+                            "walk is an empty slot rather than a shift. Every "
+                            "walk must carry a time. Without it, walks are "
+                            "placed one declared interval apart in the order "
+                            "given")
+    adopt.set_defaults(func=_cmd_adopt)
 
     validate = subparsers.add_parser(
         "validate-attestation",
@@ -1040,7 +2386,10 @@ def build_parser() -> argparse.ArgumentParser:
 # PluginError joins these because a vertical that could not be loaded is a
 # refusal with something to say, not a traceback from somewhere downstream
 # about a vocabulary nobody supplied.
-REFUSALS = (CredentialError, CertificatePinError, PluginError)
+# WalkFileError joins them because a walk the reader cannot read -- a sensor with
+# no name, a file that is not JSON, a path that is not there -- escaped as a
+# traceback from every command that loads one.
+REFUSALS = (CredentialError, CertificatePinError, PluginError, WalkFileError)
 
 
 class _StdoutThatOutlivesItsReader:

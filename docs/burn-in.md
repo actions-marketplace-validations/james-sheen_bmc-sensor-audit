@@ -28,36 +28,61 @@ Measured on 0.1.7, with observations declared one minute apart:
 | Indicator window | Most samples that can ever be in-window | Ten-sample floor reachable |
 |---|---|---|
 | `10m` | 9 | **no — 100 walks still declined** |
-| `15m` (what this tool generates) | 14 | yes, from the tenth walk |
+| `15m` (what this tool generates at a one-minute grid) | 14 | yes, from the tenth walk |
 | `60m` | 59 | yes |
 
 The `10m` row is the one worth staring at. A hundred walks, a completely frozen
 sensor, and the answer is still *not enough data* — because the in-window count
 saturates at `window ÷ interval − 1` and that is nine.
 
-This tool generates `window: 15m`, so the usable band is **10 walks minimum, with
-headroom to 14**. Past 14 the oldest samples fall out of the window and the
-newest 14 are what gets judged, which is fine: 14 is still above the floor. A test
-pins that relationship (`tests/test_burn_in_cadence.py`), because a future edit
-narrowing the window to make the check *more responsive* would silently switch
-liveness off across every platform.
+So the usable band is **10 walks minimum, with headroom to 14**. Past 14 the
+oldest samples fall out of the window and the newest 14 are what gets judged,
+which is fine: 14 is still above the floor. A test pins that relationship
+(`tests/test_burn_in_cadence.py`), because a future edit narrowing the window to
+make the check *more responsive* would silently switch liveness off across every
+platform.
 
-## Why the station's interval is not in the arithmetic
+## The window is a number of samples, not a number of minutes
 
-It is not in the arithmetic because the tool does not tell the engine what it was.
-The feeder registers each walk's reading as an observation **declared one minute
-apart**, whatever the wall-clock gap between the captures actually was. Ten walks
-taken five seconds apart and ten walks taken an hour apart arrive identically.
+**This page used to say the station's interval was not in the arithmetic, and
+that it was deliberate.** It was not deliberate so much as unavoidable at the
+time, and the sentence that explained it named the real problem:
 
-That is deliberate, and it is worth understanding rather than trusting. What the
-window is needed for here is **inclusion** — that the samples get counted — and
-not chronology, because the frozen test is over the *values*: did this reading
-ever differ from itself across the samples in the window. Declaring the real
-interval instead would make the window meaningful and switch liveness off on any
-station walking more slowly than about a hundred seconds, which is most of them.
+> Declaring the real interval instead would make the window meaningful and
+> switch liveness off on any station walking more slowly than about a hundred
+> seconds, which is most of them.
 
-So the interval does not decide whether the check runs. It decides what the answer
-**means**, and the tool cannot know that for you:
+That is true, and it was measured: at a five-minute cadence a fifteen-minute
+window holds two samples, and two completely frozen sensors over forty walks
+produce no finding at all. The branch that was missing is the third one — tell
+the engine the real interval **and scale the window with it**. A window is a cap
+on countable samples, so its only meaningful unit is the collector's own step,
+and fifteen minutes was fifteen of those steps all along with one of the three
+terms left out.
+
+`presence-audit` 0.1.10 does both. The window is generated as **fifteen
+collection intervals**, so:
+
+| Cadence you declare | Window generated | Samples it holds |
+|---|---|---|
+| none declared | `15m` | 14 |
+| 60 s | `15m` | 14 |
+| 300 s | `75m` | 14 |
+| 900 s | `225m` | 14 |
+
+**A board that declares no cadence is unaffected**, and that is not a hope: the
+default grid is still sixty seconds and `15m` is still the string generated, so
+every model this tool has ever produced is unchanged.
+
+**The cadence is declared in `--supplemental`, as `sampling_interval_s`,** and it
+is required as soon as a coupling is declared — a coupling's propagation delay
+has to land on the collection grid or no pair of readings can be aligned. If you
+declare no coupling you need not declare a cadence, and the paragraph below is
+then the whole story.
+
+## What the interval decides
+
+It decides what the answer **means**, and the tool cannot know that for you:
 
 - Ten walks five seconds apart: this value did not move in 45 seconds.
 - Ten walks ten minutes apart: this value did not move in an hour and a half.
@@ -116,3 +141,76 @@ this tool cannot tell those apart. And the honest limit stated everywhere else i
 this repository applies here too — **no real BMC has yet been watched going quiet
 by itself.** The stuck-at pathway is proven against firmware readings under
 ground truth somebody controlled, which is not the same claim.
+
+## Grading the engine's forecasts on a real board
+
+Everything above asks whether a board's sensors stayed alive. A resident run can
+ask a second question during the same burn-in: **how often did the engine's
+forecast of this board land inside its own stated band, and did it beat a random
+walk?** No physical board has answered it yet. This section is written before
+any has, so that nothing below can be tuned to fit a result.
+
+### What has to exist first
+
+- A board reachable over Redfish, its entity-manager configuration, and a
+  supplemental file declaring at least one coupling whose basis is the board's
+  own firmware configuration. `examples/supplemental/ampere-mtjade.json`
+  declares one for Ampere Mt. Jade -- `TS4_Temp` driving `FAN3_1`, from the
+  platform's phosphor-fan-control files. For another board, declare its
+  coupling the same way, from its own fan-control configuration;
+  `TEMPLATE.json` says what a basis has to carry.
+- `bmc-sensor-audit[detect]` at the release that ships `--keep-walks`, or later.
+
+### The run
+
+```
+bmc-sensor-audit detect --config <configs> --supplemental <board>.json \
+    --target https://<bmc> <credentials, as for capture> \
+    --resident --ledger burn-in.sqlite --history readings.sqlite \
+    --keep-walks walks/
+```
+
+Every cycle prints one line: the instant, the exit code, what was filed, and the
+ledger's own figures with their denominators -- `confirm_rate` against the rate
+the forecasts' own bands promised, and each model's CRPS beside the random walk's.
+
+### When each figure can first exist
+
+From the tool's defaults, not from a run. The cadence is the supplemental's
+`sampling_interval_s` -- 60 s in the Mt. Jade example -- and a forecast looks one
+cadence ahead.
+
+- **The driver's forecast.** Its projector fits on five readings, so the first
+  forecast is filed on the fifth cycle and graded one horizon plus the ledger's
+  60 s grace later: about seven minutes in, at 60 s.
+- **The coupling's own projections.** None until its gain is written down. The
+  gain is fitted from paired changes -- consecutive readings of the two sensors,
+  aligned -- and the engine will not fit one below 120, so the proposal appears
+  after about 121 walks: two hours at 60 s. `adopt --list`, given the same
+  `--config` and `--supplemental` and `--walk walks/*.json`, shows it; `adopt`
+  writes it; a second resident run over the updated supplemental grades what
+  the coupling predicts. Keep the default cadence: `adopt` places recorded
+  walks one declared `sampling_interval_s` apart, so a run walked at another
+  `--every` would be fitted on the wrong spacing.
+- **Nothing moves, nothing is fitted.** A driver that never changes across the
+  walks is refused `unidentifiable_parameter`. An ambient sensor on a thermally
+  settled bench may do exactly that; the burn-in's own load is what moves it.
+
+### What to record, and how
+
+Stop the run first -- the ledger is written between cycles -- then add one row
+below per board and date:
+
+- the last cycle line, copied verbatim;
+- `sha256sum burn-in.sqlite` and the digest of the walks (`sha256sum walks/*.json | sha256sum`);
+- the versions (`bmc-sensor-audit --version`, and the engine's from `pip show arbiter-engine`);
+- the board, as its own Redfish chassis model reports it, and the cadence.
+
+**A figure is quoted with its count and the random walk's figure beside it, or
+not at all.** The first graded cycle is a smoke test; the row is taken from the
+run as it stood when it was stopped. What a row claims is what the engine's
+forecasts did on that board over that span, and nothing about any other board.
+
+| Date | Board | Cycles | Last cycle line | `burn-in.sqlite` sha256 | Walks digest | Versions |
+|---|---|---|---|---|---|---|
+| *none yet* | | | | | | |
